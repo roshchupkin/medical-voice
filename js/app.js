@@ -35,6 +35,17 @@ const detailAudio = document.getElementById('detailAudio');
 const detailRetranscribeBtn = document.getElementById('detailRetranscribeBtn');
 const detailDownloadAudioLink = document.getElementById('detailDownloadAudioLink');
 const toastEl = document.getElementById('toast');
+const fillFormBtn = document.getElementById('fillFormBtn');
+const detailFillFormBtn = document.getElementById('detailFillFormBtn');
+const llmStatus = document.getElementById('llmStatus');
+const llmProgressWrap = document.getElementById('llmProgressWrap');
+const llmProgressBar = document.getElementById('llmProgressBar');
+const templateFieldsEl = document.getElementById('templateFields');
+const addFieldBtn = document.getElementById('addFieldBtn');
+const resetTemplateBtn = document.getElementById('resetTemplateBtn');
+const formFieldsEl = document.getElementById('formFields');
+const downloadFormJsonBtn = document.getElementById('downloadFormJsonBtn');
+const formSourceHint = document.getElementById('formSourceHint');
 
 // --- State ---
 let currentTranscriptText = '';
@@ -43,6 +54,11 @@ let currentAudioObjectUrl = null;
 let currentDetailTranscript = null;
 let detailAudioObjectUrl = null;
 let isTranscribing = false;
+let currentFormData = null;   // { fieldName: value } or null
+let formSourceId = null;      // saved transcript id the form belongs to, or null for the current (unsaved) transcript
+let formBelongsToCurrent = false; // true when the form was filled from the current (left panel) transcript
+let isExtracting = false;
+let llmSupported = 'gpu' in navigator;
 
 // --- Worker / model loading ---
 const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
@@ -185,6 +201,7 @@ function setResult(text, isError = false) {
   currentTranscriptText = isError ? '' : (text || '');
   saveBtn.disabled = !currentTranscriptText;
   downloadBtn.disabled = !currentTranscriptText;
+  fillFormBtn.disabled = !currentTranscriptText || !llmSupported || isExtracting;
 }
 
 function setLoading(message) {
@@ -192,6 +209,7 @@ function setLoading(message) {
   resultEl.className = 'loading';
   saveBtn.disabled = true;
   downloadBtn.disabled = true;
+  fillFormBtn.disabled = true;
 }
 
 function showToast(message) {
@@ -410,6 +428,11 @@ saveBtn.addEventListener('click', async () => {
       await db.saveRecording(recordingId, currentAudioBlob, currentAudioBlob.type);
       entry.recordingId = recordingId;
     }
+    if (currentFormData && formBelongsToCurrent) {
+      entry.form = { ...currentFormData };
+      formSourceId = id;
+      updateFormSourceHint();
+    }
     await db.saveTranscript(entry);
     showToast('Saved as "' + title + '".');
     loadSavedList();
@@ -419,7 +442,8 @@ saveBtn.addEventListener('click', async () => {
 });
 
 downloadBtn.addEventListener('click', () => {
-  downloadAsTxt(currentTranscriptText, 'transcript.txt');
+  const form = (currentFormData && formBelongsToCurrent) ? currentFormData : null;
+  downloadAsTxt(transcriptWithFormText(currentTranscriptText, form), 'transcript.txt');
 });
 
 // --- Saved transcripts list ---
@@ -489,6 +513,12 @@ async function openTranscript(id) {
       detailAudio.src = '';
       detailDownloadAudioLink.href = '#';
     }
+    if (t.form && Object.keys(t.form).length) {
+      currentFormData = { ...t.form };
+      formSourceId = t.id;
+      formBelongsToCurrent = false;
+      renderForm();
+    }
     detailPanel.classList.remove('hidden');
   } catch (e) {
     showToast('Could not open transcript.');
@@ -503,6 +533,7 @@ async function removeTranscript(id) {
       detailPanel.classList.add('hidden');
       currentDetailTranscript = null;
     }
+    if (formSourceId === id) clearForm();
     loadSavedList();
   } catch (e) {
     showToast('Could not delete.');
@@ -558,7 +589,8 @@ detailRenameBtn.addEventListener('click', async () => {
 
 detailDownloadBtn.addEventListener('click', () => {
   if (!currentDetailTranscript) return;
-  downloadAsTxt(currentDetailTranscript.text, (currentDetailTranscript.title || 'transcript').replace(/\s+/g, '_') + '.txt');
+  const t = currentDetailTranscript;
+  downloadAsTxt(transcriptWithFormText(t.text || '', t.form), (t.title || 'transcript').replace(/\s+/g, '_') + '.txt');
 });
 
 // --- Detail: re-transcribe with currently selected model/language ---
@@ -595,5 +627,318 @@ modelSelect.addEventListener('change', () => {
   }
 });
 
+// =====================================================================
+// Medical form filling (local LLM via Web-LLM, see js/llm-worker.js)
+// =====================================================================
+
+const DEFAULT_TEMPLATE = [
+  { name: 'Reason for visit', hint: 'Why the patient came in' },
+  { name: 'Symptoms', hint: 'Symptoms reported by the patient, with onset and duration' },
+  { name: 'Findings', hint: 'Observations or examination findings mentioned by the clinician' },
+  { name: 'Plan / medication', hint: 'Recommended actions, prescriptions with dosage, follow-up' },
+];
+
+let templateFields = DEFAULT_TEMPLATE.map(f => ({ ...f }));
+
+function debounce(fn, ms) {
+  let timer = null;
+  return (...args) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn(...args); }, ms);
+  };
+}
+
+// --- Template editor ---
+const persistTemplate = debounce(() => {
+  db.saveFormTemplate(templateFields).catch(() => showToast('Could not save form template.'));
+}, 600);
+
+function renderTemplateEditor() {
+  templateFieldsEl.innerHTML = '';
+  templateFields.forEach((field, i) => {
+    const row = document.createElement('div');
+    row.className = 'template-field-row';
+
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'field-name';
+    nameInput.placeholder = 'Field name';
+    nameInput.value = field.name;
+    nameInput.addEventListener('input', () => { templateFields[i].name = nameInput.value; persistTemplate(); });
+
+    const hintInput = document.createElement('input');
+    hintInput.type = 'text';
+    hintInput.className = 'field-hint';
+    hintInput.placeholder = 'Hint for the AI (optional)';
+    hintInput.value = field.hint || '';
+    hintInput.addEventListener('input', () => { templateFields[i].hint = hintInput.value; persistTemplate(); });
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'danger';
+    removeBtn.textContent = '✕';
+    removeBtn.title = 'Remove field';
+    removeBtn.addEventListener('click', () => {
+      templateFields.splice(i, 1);
+      renderTemplateEditor();
+      persistTemplate();
+    });
+
+    row.append(nameInput, hintInput, removeBtn);
+    templateFieldsEl.appendChild(row);
+  });
+}
+
+addFieldBtn.addEventListener('click', () => {
+  templateFields.push({ name: '', hint: '' });
+  renderTemplateEditor();
+  templateFieldsEl.querySelector('.template-field-row:last-child .field-name')?.focus();
+});
+
+resetTemplateBtn.addEventListener('click', () => {
+  templateFields = DEFAULT_TEMPLATE.map(f => ({ ...f }));
+  renderTemplateEditor();
+  persistTemplate();
+});
+
+async function loadTemplate() {
+  try {
+    const saved = await db.getFormTemplate();
+    if (Array.isArray(saved) && saved.length) {
+      templateFields = saved.map(f => ({ name: String(f.name || ''), hint: String(f.hint || '') }));
+    }
+  } catch (_) { /* keep defaults */ }
+  renderTemplateEditor();
+}
+
+function buildSchema() {
+  const fields = templateFields.filter(f => f.name.trim());
+  if (!fields.length) return null;
+  const properties = {};
+  const required = [];
+  for (const f of fields) {
+    const name = f.name.trim();
+    if (properties[name]) continue; // skip duplicate names
+    properties[name] = { type: 'string' };
+    if (f.hint && f.hint.trim()) properties[name].description = f.hint.trim();
+    required.push(name);
+  }
+  return { type: 'object', properties, required };
+}
+
+// --- LLM worker (lazy: created on first "Fill form" click) ---
+let llmWorker = null;
+let llmModelReady = false;
+const pendingExtracts = new Map(); // id -> { resolve, reject }
+let extractCounter = 0;
+
+function setLlmProgress(text, progress) {
+  llmStatus.textContent = text;
+  if (typeof progress === 'number' && progress > 0 && progress < 1) {
+    llmProgressWrap.classList.add('visible');
+    llmProgressBar.style.width = Math.round(progress * 100) + '%';
+  } else {
+    llmProgressWrap.classList.remove('visible');
+    llmProgressBar.style.width = '0%';
+  }
+}
+
+function getLlmWorker() {
+  if (llmWorker) return llmWorker;
+  llmWorker = new Worker(new URL('./llm-worker.js', import.meta.url), { type: 'module' });
+  llmWorker.onmessage = (e) => {
+    const msg = e.data;
+    switch (msg.type) {
+      case 'progress':
+        setLlmProgress(msg.text || 'Loading form model…', msg.progress);
+        break;
+      case 'ready':
+        llmModelReady = true;
+        setLlmProgress('Form model ready: Qwen2.5 1.5B (cached for offline use).');
+        break;
+      case 'complete': {
+        const job = pendingExtracts.get(msg.id);
+        if (job) { pendingExtracts.delete(msg.id); job.resolve({ data: msg.data, truncated: msg.truncated }); }
+        break;
+      }
+      case 'error': {
+        const err = new Error(msg.message || 'Form model error');
+        if (msg.id !== undefined && pendingExtracts.has(msg.id)) {
+          const job = pendingExtracts.get(msg.id);
+          pendingExtracts.delete(msg.id);
+          job.reject(err);
+        } else {
+          setLlmProgress('Form model error: ' + err.message);
+        }
+        break;
+      }
+    }
+  };
+  llmWorker.onerror = (e) => {
+    const err = new Error(e.message || 'Form model worker failed');
+    setLlmProgress('Form model failed to start: ' + err.message);
+    for (const [id, job] of pendingExtracts) {
+      job.reject(err);
+      pendingExtracts.delete(id);
+    }
+    // Allow a fresh worker on next attempt (e.g. after a network hiccup).
+    llmWorker.terminate();
+    llmWorker = null;
+    llmModelReady = false;
+  };
+  return llmWorker;
+}
+
+function extractInWorker(transcript, schema) {
+  const id = ++extractCounter;
+  return new Promise((resolve, reject) => {
+    pendingExtracts.set(id, { resolve, reject });
+    getLlmWorker().postMessage({ type: 'extract', id, transcript, schema });
+  });
+}
+
+// --- Filled form rendering / persistence ---
+const persistFormToTranscript = debounce(() => {
+  if (!formSourceId || !currentFormData) return;
+  db.updateTranscript(formSourceId, { form: { ...currentFormData } })
+    .then((updated) => {
+      if (currentDetailTranscript && currentDetailTranscript.id === updated.id) currentDetailTranscript = updated;
+    })
+    .catch(() => showToast('Could not save form changes.'));
+}, 600);
+
+function updateFormSourceHint() {
+  if (!currentFormData) { formSourceHint.textContent = ''; return; }
+  formSourceHint.textContent = formSourceId
+    ? 'This form is stored with its saved transcript. Edits are saved automatically.'
+    : 'This form belongs to the current transcript. Click "Save transcript" to store them together.';
+}
+
+function renderForm() {
+  formFieldsEl.innerHTML = '';
+  if (!currentFormData) {
+    formFieldsEl.innerHTML = '<p class="empty-state">Transcribe audio, then click "Fill form" to extract data into these fields.</p>';
+    downloadFormJsonBtn.disabled = true;
+    updateFormSourceHint();
+    return;
+  }
+  for (const [name, value] of Object.entries(currentFormData)) {
+    const wrap = document.createElement('div');
+    wrap.className = 'form-field';
+    const label = document.createElement('label');
+    label.textContent = name;
+    const area = document.createElement('textarea');
+    area.value = value || '';
+    area.addEventListener('input', () => {
+      currentFormData[name] = area.value;
+      if (formSourceId) persistFormToTranscript();
+    });
+    wrap.append(label, area);
+    formFieldsEl.appendChild(wrap);
+  }
+  downloadFormJsonBtn.disabled = false;
+  updateFormSourceHint();
+}
+
+function clearForm() {
+  currentFormData = null;
+  formSourceId = null;
+  formBelongsToCurrent = false;
+  renderForm();
+}
+
+function formAsText(form) {
+  return Object.entries(form)
+    .map(([name, value]) => name + ':\n' + (value || '—'))
+    .join('\n\n');
+}
+
+function transcriptWithFormText(text, form) {
+  if (!form || !Object.keys(form).length) return text;
+  return text + '\n\n----- Medical form -----\n\n' + formAsText(form);
+}
+
+// --- Extraction flow ---
+async function runFormFill(transcript, sourceId) {
+  if (isExtracting) return;
+  const text = (transcript || '').trim();
+  if (!text) { showToast('Nothing to extract: transcript is empty.'); return; }
+  const schema = buildSchema();
+  if (!schema) { showToast('Add at least one form field to the template first.'); return; }
+
+  isExtracting = true;
+  fillFormBtn.disabled = true;
+  detailFillFormBtn.disabled = true;
+  if (!llmModelReady) setLlmProgress('Loading form model (first use downloads ~900 MB, then cached)…');
+  formFieldsEl.innerHTML = '<p class="empty-state loading">Extracting form data from transcript…</p>';
+  formSourceHint.textContent = '';
+  downloadFormJsonBtn.disabled = true;
+
+  try {
+    const { data, truncated } = await extractInWorker(text, schema);
+    // Keep template field order; coerce values to strings.
+    const form = {};
+    for (const name of Object.keys(schema.properties)) {
+      const v = data ? data[name] : '';
+      form[name] = (v === null || v === undefined) ? '' : String(v);
+    }
+    currentFormData = form;
+    formSourceId = sourceId || null;
+    formBelongsToCurrent = !sourceId;
+    renderForm();
+    if (formSourceId) {
+      const updated = await db.updateTranscript(formSourceId, { form: { ...form } });
+      if (currentDetailTranscript && currentDetailTranscript.id === updated.id) currentDetailTranscript = updated;
+      showToast('Form filled and saved with the transcript.');
+    } else {
+      showToast('Form filled. Review the fields before use.');
+    }
+    if (truncated) showToast('Note: transcript was very long and was truncated for extraction.');
+    setLlmProgress('Form model ready: Qwen2.5 1.5B (cached for offline use).');
+  } catch (err) {
+    formFieldsEl.innerHTML = '<p class="empty-state error">Form filling failed: ' + escapeHtml(err.message || 'unknown error') + '</p>';
+    let statusMsg = 'Form model error: ' + (err.message || 'unknown error');
+    if (/memory|allocat|device.*lost/i.test(err.message || '')) {
+      statusMsg += ' — your GPU may not have enough memory for this model. Close other tabs and try again.';
+    } else if (/fetch|network|download/i.test(err.message || '')) {
+      statusMsg += ' — the model download may have been interrupted. Check your connection and try again.';
+    }
+    setLlmProgress(statusMsg);
+  } finally {
+    isExtracting = false;
+    fillFormBtn.disabled = !currentTranscriptText || !llmSupported;
+    detailFillFormBtn.disabled = !llmSupported;
+  }
+}
+
+fillFormBtn.addEventListener('click', () => runFormFill(currentTranscriptText, null));
+
+detailFillFormBtn.addEventListener('click', () => {
+  if (!currentDetailTranscript) return;
+  runFormFill(currentDetailTranscript.text, currentDetailTranscript.id);
+});
+
+downloadFormJsonBtn.addEventListener('click', () => {
+  if (!currentFormData) return;
+  const blob = new Blob([JSON.stringify(currentFormData, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'medical-form.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+function initLlmSupport() {
+  if (llmSupported) return;
+  fillFormBtn.disabled = true;
+  detailFillFormBtn.disabled = true;
+  const reason = 'Form filling needs WebGPU, which this browser does not support. Use a recent Chrome or Edge.';
+  fillFormBtn.title = reason;
+  detailFillFormBtn.title = reason;
+  llmStatus.textContent = reason + ' Transcription still works normally.';
+}
+
 // --- Init ---
+initLlmSupport();
+loadTemplate();
 loadSavedList();

@@ -1,7 +1,8 @@
-// IndexedDB wrapper: transcripts (metadata + text) and recordings (audio blobs).
+// IndexedDB wrapper: transcripts (metadata + text), recordings (audio blobs),
+// and settings (form template).
 
 const DB_NAME = 'whisper-local';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
@@ -17,6 +18,9 @@ function openDb() {
       }
       if (!db.objectStoreNames.contains('recordings')) {
         db.createObjectStore('recordings', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('settings')) {
+        db.createObjectStore('settings', { keyPath: 'key' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -92,4 +96,18 @@ export async function getRecording(id) {
 export async function deleteRecording(id) {
   const db = await openDb();
   await tx(db, 'recordings', 'readwrite', (store) => store.delete(id));
+}
+
+// --- Form template (clinician-editable field list) ---
+
+export async function getFormTemplate() {
+  const db = await openDb();
+  const entry = await tx(db, 'settings', 'readonly', (store) => store.get('formTemplate'));
+  return entry ? entry.fields : null;
+}
+
+export async function saveFormTemplate(fields) {
+  const db = await openDb();
+  await tx(db, 'settings', 'readwrite', (store) => store.put({ key: 'formTemplate', fields }));
+  return fields;
 }

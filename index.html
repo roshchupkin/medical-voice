@@ -237,6 +237,64 @@
     .detail-retranscribe-row { margin-top: 0.5rem; }
     .button-as-link { padding: 0.4rem 0.65rem; font-size: 0.85rem; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--card); color: var(--text); text-decoration: none; cursor: pointer; font-family: inherit; }
     .button-as-link:hover { background: #f0f0f0; }
+    /* Medical form panel */
+    .form-panel { margin-top: 1.5rem; }
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+    }
+    @media (max-width: 700px) {
+      .form-grid { grid-template-columns: 1fr; }
+    }
+    .form-panel h3 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin: 0 0 0.6rem 0;
+    }
+    .llm-status-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+      font-size: 0.9rem;
+      margin-bottom: 1rem;
+    }
+    .template-field-row {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+      align-items: center;
+    }
+    .template-field-row input {
+      padding: 0.45rem 0.6rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      font-family: inherit;
+      font-size: 0.9rem;
+    }
+    .template-field-row .field-name { flex: 1; min-width: 0; }
+    .template-field-row .field-hint { flex: 2; min-width: 0; }
+    .template-field-row button { padding: 0.35rem 0.6rem; font-size: 0.85rem; flex-shrink: 0; }
+    .template-actions { margin-top: 0.75rem; }
+    .form-field { margin-bottom: 0.85rem; }
+    .form-field label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+    }
+    .form-field textarea {
+      width: 100%;
+      min-height: 56px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      padding: 0.6rem;
+      font-family: inherit;
+      font-size: 0.9rem;
+      resize: vertical;
+    }
+    .form-actions { margin-top: 0.5rem; }
     /* Toast */
     .toast {
       position: fixed;
@@ -313,6 +371,7 @@
         <div class="transcript-actions">
           <button type="button" id="saveBtn" class="primary" disabled>Save transcript</button>
           <button type="button" id="downloadBtn" disabled>Download .txt</button>
+          <button type="button" id="fillFormBtn" disabled>Fill form</button>
         </div>
       </div>
 
@@ -344,7 +403,36 @@
             <button type="button" id="detailCancelEditBtn" style="display:none;">Cancel</button>
             <button type="button" id="detailRenameBtn">Rename</button>
             <button type="button" id="detailDownloadBtn">Download .txt</button>
+            <button type="button" id="detailFillFormBtn">Fill form</button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section C: Medical form (local LLM) -->
+    <div class="panel form-panel">
+      <h2>Medical form</h2>
+      <div class="llm-status-row">
+        <span class="model-status" id="llmStatus">The form-filling model (Qwen2.5 1.5B, ~900 MB) downloads on first use, then is cached for offline use. Runs locally via WebGPU.</span>
+        <div class="progress-wrap" id="llmProgressWrap"><div class="progress-bar" id="llmProgressBar"></div></div>
+      </div>
+      <div class="form-grid">
+        <div>
+          <h3>Form fields (template)</h3>
+          <div id="templateFields"></div>
+          <div class="row template-actions">
+            <button type="button" id="addFieldBtn">Add field</button>
+            <button type="button" id="resetTemplateBtn">Reset to default</button>
+          </div>
+          <p class="hint">Define which fields the AI should fill from the transcript. The hint tells the model what to extract. Changes are saved automatically.</p>
+        </div>
+        <div>
+          <h3>Filled form</h3>
+          <div id="formFields"><p class="empty-state">Transcribe audio, then click "Fill form" to extract data into these fields.</p></div>
+          <div class="row form-actions">
+            <button type="button" id="downloadFormJsonBtn" disabled>Download .json</button>
+          </div>
+          <p class="hint" id="formSourceHint"></p>
         </div>
       </div>
     </div>

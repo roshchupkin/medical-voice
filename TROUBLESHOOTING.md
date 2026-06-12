@@ -19,3 +19,19 @@ Transcripts are stored in the browser's IndexedDB, scoped to the exact origin (p
 ## "Could not decode this audio file"
 
 The browser could not decode the uploaded format. Convert to WAV/MP3/M4A/OGG/WebM first (e.g. with ffmpeg: `ffmpeg -i input.xyz output.mp3`).
+
+## "Fill form" button is disabled
+
+Form filling runs a local LLM that **requires WebGPU** (there is no CPU fallback, unlike transcription). Use a recent Chrome or Edge on a machine with a GPU. Transcription keeps working without it.
+
+## Form model download fails or is slow
+
+The form model (~900 MB) is fetched from `huggingface.co` (via the Web-LLM library on `esm.run`/`jsdelivr`) on first use, then cached. If the download is interrupted, click "Fill form" again — it resumes from the cache. Check that the network allows those hosts.
+
+## Form filling fails with a memory/device error
+
+The LLM needs roughly 2 GB of GPU memory. Close other GPU-heavy tabs and applications and try again. On machines with very little GPU memory the model may not fit at all.
+
+## Form fields come back empty or wrong
+
+The model only extracts what is literally in the transcript (temperature 0, schema-constrained). Improve the per-field hints in the template (e.g. "Prescriptions with dosage"), or edit the filled fields manually — they are plain text boxes. Very long transcripts are truncated to roughly the first 16,000 characters for extraction.

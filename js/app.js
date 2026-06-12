@@ -938,7 +938,25 @@ function initLlmSupport() {
   llmStatus.textContent = reason + ' Transcription still works normally.';
 }
 
+// Ask the browser to protect this site's storage (cached models, saved
+// transcripts) from automatic eviction under disk pressure. Best-effort:
+// browsers may decline silently, and the user can still clear site data.
+async function requestPersistentStorage() {
+  if (!navigator.storage || !navigator.storage.persist) return;
+  try {
+    const alreadyPersisted = await navigator.storage.persisted();
+    if (alreadyPersisted) return;
+    const granted = await navigator.storage.persist();
+    console.log(granted
+      ? 'Persistent storage granted: cached models will not be auto-evicted.'
+      : 'Persistent storage declined: storage remains best-effort.');
+  } catch (_) {
+    // Not critical; ignore.
+  }
+}
+
 // --- Init ---
 initLlmSupport();
 loadTemplate();
 loadSavedList();
+requestPersistentStorage();

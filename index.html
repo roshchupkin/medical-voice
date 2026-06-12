@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Whisper – Private In-Browser Transcription</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      --bg: #f0f2f5;
+      --card: #fff;
+      --text: #1a1a1a;
+      --text-muted: #5c5c5c;
+      --primary: #0d6efd;
+      --primary-hover: #0b5ed7;
+      --danger: #dc3545;
+      --danger-hover: #bb2d3b;
+      --border: #dee2e6;
+      --shadow: 0 1px 3px rgba(0,0,0,0.08);
+      --radius: 10px;
+      --radius-sm: 6px;
+    }
+    body {
+      font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+      margin: 0;
+      padding: 1.5rem 1rem 2rem;
+      color: var(--text);
+      background: var(--bg);
+      font-size: 1rem;
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+    header {
+      margin-bottom: 1.25rem;
+    }
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin: 0 0 0.25rem 0;
+    }
+    .subtitle {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      margin: 0;
+    }
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+    }
+    @media (max-width: 700px) {
+      .main-grid { grid-template-columns: 1fr; }
+    }
+    .panel {
+      background: var(--card);
+      border-radius: var(--radius);
+      padding: 1.35rem;
+      box-shadow: var(--shadow);
+    }
+    .panel h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin: 0 0 1rem 0;
+      color: var(--text);
+    }
+    .row {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    button, .upload-wrap {
+      padding: 0.6rem 1rem;
+      border-radius: var(--radius-sm);
+      font-size: 0.95rem;
+      font-family: inherit;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text);
+    }
+    button:hover:not(:disabled), .upload-wrap:hover { background: #f0f0f0; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    button.record { background: #e8f4fd; border-color: var(--primary); color: var(--primary); font-weight: 500; }
+    button.record:hover:not(:disabled) { background: #cce5ff; }
+    button.record.stop { background: #f8d7da; border-color: var(--danger); color: var(--danger); }
+    button.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+    button.primary:hover:not(:disabled) { background: var(--primary-hover); }
+    button.danger { background: #fff; border-color: var(--danger); color: var(--danger); }
+    button.danger:hover:not(:disabled) { background: #f8d7da; }
+    select {
+      padding: 0.4rem 0.6rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      font-family: inherit;
+      font-size: 0.9rem;
+      background: var(--card);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .upload-wrap {
+      display: inline-block;
+      position: relative;
+      font-weight: 500;
+    }
+    .upload-wrap input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+    #result {
+      min-height: 80px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: 0.5rem 0;
+      color: var(--text);
+    }
+    .loading { color: var(--text-muted); font-style: italic; }
+    .error { color: var(--danger); }
+    .hint { font-size: 0.85rem; color: var(--text-muted); margin-top: 0.5rem; }
+    .recorded-section { margin-top: 1rem; }
+    .recorded-section.hidden { display: none; }
+    .model-row { margin: 0.75rem 0; align-items: center; }
+    .model-label { font-size: 0.9rem; margin-right: 0.25rem; }
+    .recording-indicator { display: none; align-items: center; gap: 0.75rem; margin-top: 0.75rem; padding: 0.65rem 1rem; background: #fff5f5; border: 1px solid #f8d7da; border-radius: var(--radius-sm); }
+    .recording-indicator.visible { display: flex; flex-wrap: wrap; }
+    .rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); animation: rec-pulse 1.2s ease-in-out infinite; flex-shrink: 0; }
+    .recording-indicator.paused .rec-dot { animation: none; background: var(--text-muted); }
+    @keyframes rec-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.6; transform: scale(1.15); } }
+    .rec-time { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); min-width: 3.5rem; }
+    .rec-paused { font-size: 0.9rem; color: var(--text-muted); font-style: italic; }
+    .recording-actions { display: flex; gap: 0.5rem; margin-left: auto; }
+    .recording-actions button { padding: 0.4rem 0.75rem; font-size: 0.9rem; }
+    .rec-paused.hidden { display: none; }
+    .transcript-actions {
+      margin-top: 0.75rem;
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    /* Engine status bar */
+    .status-bar {
+      background: var(--card);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 0.75rem 1.35rem;
+      margin-bottom: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+      font-size: 0.9rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.6rem;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text-muted);
+    }
+    .badge.webgpu { background: #d1f7e0; border-color: #28a745; color: #14692d; }
+    .badge.wasm { background: #fff3cd; border-color: #ffc107; color: #7a5c00; }
+    .model-status { color: var(--text-muted); flex: 1; min-width: 200px; }
+    .progress-wrap {
+      flex-basis: 100%;
+      height: 8px;
+      background: var(--bg);
+      border-radius: 999px;
+      overflow: hidden;
+      display: none;
+    }
+    .progress-wrap.visible { display: block; }
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: var(--primary);
+      border-radius: 999px;
+      transition: width 0.2s ease;
+    }
+    /* Saved list */
+    .saved-list { list-style: none; padding: 0; margin: 0; }
+    .saved-list li {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.65rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .saved-list li:last-child { border-bottom: none; }
+    .saved-list .item-title { font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .saved-list .item-date { font-size: 0.8rem; color: var(--text-muted); flex-shrink: 0; }
+    .saved-list .item-actions { display: flex; gap: 0.35rem; flex-shrink: 0; }
+    .saved-list button { padding: 0.4rem 0.65rem; font-size: 0.85rem; }
+    .empty-state {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      padding: 1rem 0;
+      text-align: center;
+    }
+    /* Detail view */
+    .detail-panel { margin-top: 1rem; }
+    .detail-panel.hidden { display: none; }
+    .detail-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; flex-wrap: wrap; gap: 0.5rem; }
+    .detail-header h3 { margin: 0; font-size: 1rem; font-weight: 600; }
+    .detail-content {
+      background: var(--bg);
+      border-radius: var(--radius-sm);
+      padding: 0.85rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 200px;
+      overflow-y: auto;
+      font-size: 0.9rem;
+    }
+    .detail-edit-area {
+      width: 100%;
+      min-height: 160px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      padding: 0.85rem;
+      font-family: inherit;
+      font-size: 0.9rem;
+      resize: vertical;
+    }
+    .detail-edit-area.hidden { display: none; }
+    .detail-content.hidden { display: none; }
+    .detail-actions { margin-top: 0.5rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .detail-recording-section { margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+    .detail-recording-section.hidden { display: none; }
+    .detail-recording-label { display: block; margin-bottom: 0.25rem; }
+    .detail-retranscribe-row { margin-top: 0.5rem; }
+    .button-as-link { padding: 0.4rem 0.65rem; font-size: 0.85rem; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--card); color: var(--text); text-decoration: none; cursor: pointer; font-family: inherit; }
+    .button-as-link:hover { background: #f0f0f0; }
+    /* Toast */
+    .toast {
+      position: fixed;
+      bottom: 1.5rem;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 0.6rem 1rem;
+      border-radius: var(--radius-sm);
+      background: var(--text);
+      color: #fff;
+      font-size: 0.9rem;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      z-index: 1000;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Whisper</h1>
+      <p class="subtitle">Fully private transcription: audio and text never leave this browser. Models run locally via WebGPU or WebAssembly.</p>
+    </header>
+
+    <div class="status-bar">
+      <span>Engine: <span class="badge" id="engineBadge">detecting…</span></span>
+      <span class="model-status" id="modelStatus">Model not loaded yet — it downloads on first transcription, then is cached for offline use.</span>
+      <div class="progress-wrap" id="progressWrap"><div class="progress-bar" id="progressBar"></div></div>
+    </div>
+
+    <div class="main-grid">
+      <!-- Section A: Transcribe -->
+      <div class="panel">
+        <h2>Transcribe</h2>
+        <div class="row">
+          <button type="button" id="recordBtn" class="record">Record</button>
+          <span class="upload-wrap">
+            <span>Upload file</span>
+            <input type="file" id="fileInput" accept="audio/*,video/*" />
+          </span>
+        </div>
+        <div id="recordingIndicator" class="recording-indicator" aria-live="polite">
+          <span class="rec-dot" aria-hidden="true"></span>
+          <span class="rec-time" id="recordingTime">0:00</span>
+          <span class="rec-paused hidden" id="recordingPaused">Paused</span>
+          <div class="recording-actions">
+            <button type="button" id="pauseRecordBtn" class="record" style="display:none;">Pause</button>
+          </div>
+        </div>
+        <p class="hint">Record up to 3 hours, or upload audio files. Formats: WAV, MP3, M4A, WebM, OGG, etc. Unsaved recordings are kept in memory only.</p>
+        <div class="row model-row">
+          <span class="model-label">Model:</span>
+          <select id="modelSelect">
+            <option value="onnx-community/whisper-base" selected>Whisper base (~80 MB, fast)</option>
+            <option value="onnx-community/whisper-small">Whisper small (~250 MB, better Dutch)</option>
+          </select>
+          <span class="model-label">Language:</span>
+          <select id="languageSelect">
+            <option value="" selected>Auto-detect</option>
+            <option value="nl">Dutch</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <div id="recordedSection" class="recorded-section hidden">
+          <strong style="display:block; margin-top:1rem;">Audio</strong>
+          <audio id="recordedAudio" controls style="display:block; width:100%; margin-top:0.35rem;"></audio>
+          <button type="button" id="transcribeBtn" class="primary" style="margin-top:0.5rem;">Transcribe</button>
+        </div>
+        <strong style="display:block; margin-top:1rem;">Transcript</strong>
+        <div id="result">Record or upload audio to transcribe.</div>
+        <div class="transcript-actions">
+          <button type="button" id="saveBtn" class="primary" disabled>Save transcript</button>
+          <button type="button" id="downloadBtn" disabled>Download .txt</button>
+        </div>
+      </div>
+
+      <!-- Section B: Saved transcripts -->
+      <div class="panel">
+        <h2>Saved transcripts</h2>
+        <ul class="saved-list" id="savedList">
+          <li class="empty-state">Loading…</li>
+        </ul>
+        <div class="detail-panel hidden" id="detailPanel">
+          <div class="detail-header">
+            <h3 id="detailTitle">—</h3>
+            <button type="button" id="backToListBtn">Back to list</button>
+          </div>
+          <div id="detailRecordingSection" class="detail-recording-section hidden">
+            <strong class="detail-recording-label">Audio</strong>
+            <audio id="detailAudio" controls style="display:block; width:100%; margin-top:0.35rem;"></audio>
+            <div class="row model-row detail-retranscribe-row">
+              <button type="button" id="detailRetranscribeBtn" class="primary">Re-transcribe</button>
+              <span class="hint" style="margin-top:0;">Uses the model and language selected on the left.</span>
+            </div>
+            <a id="detailDownloadAudioLink" class="button-as-link" href="#" download="recording.webm" style="display:inline-block; margin-top:0.5rem;">Download audio</a>
+          </div>
+          <div class="detail-content" id="detailContent"></div>
+          <textarea class="detail-edit-area hidden" id="detailEditArea"></textarea>
+          <div class="detail-actions">
+            <button type="button" id="detailEditBtn">Edit</button>
+            <button type="button" id="detailSaveEditBtn" class="primary" style="display:none;">Save changes</button>
+            <button type="button" id="detailCancelEditBtn" style="display:none;">Cancel</button>
+            <button type="button" id="detailRenameBtn">Rename</button>
+            <button type="button" id="detailDownloadBtn">Download .txt</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" aria-live="polite"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

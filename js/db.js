@@ -1,8 +1,17 @@
-// IndexedDB wrapper: transcripts (metadata + text), recordings (audio blobs),
-// and settings (form template).
+// IndexedDB wrapper with per-user encryption at rest.
+//
+// All patient data (transcript text, titles, form values, audio) is stored as
+// AES-GCM ciphertext under the logged-in user's key. The only readable fields
+// are the record id, createdAt, mimeType, and `owner` — an opaque hash that
+// namespaces records per user without storing usernames.
+//
+// Every function here requires an unlocked session and throws when locked.
+
+import { getSession } from './auth.js';
+import { encryptJSON, decryptJSON, encryptBlob, decryptBlob } from './crypto-store.js';
 
 const DB_NAME = 'whisper-local';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let dbPromise = null;
 
@@ -15,6 +24,10 @@ function openDb() {
       if (!db.objectStoreNames.contains('transcripts')) {
         const store = db.createObjectStore('transcripts', { keyPath: 'id' });
         store.createIndex('createdAt', 'createdAt');
+        store.createIndex('owner', 'owner');
+      } else {
+        const store = req.transaction.objectStore('transcripts');
+        if (!store.indexNames.contains('owner')) store.createIndex('owner', 'owner');
       }
       if (!db.objectStoreNames.contains('recordings')) {
         db.createObjectStore('recordings', { keyPath: 'id' });
@@ -46,68 +59,170 @@ function tx(db, storeName, mode, fn) {
   });
 }
 
+// --- Transcripts ---
+// Decrypted shape (in memory): { id, createdAt, title, text, language, recordingId?, form? }
+// Stored shape: { id, owner, createdAt, iv, ciphertext }
+
+async function decryptTranscriptRow(row) {
+  const payload = await decryptJSON(row.iv, row.ciphertext);
+  return { id: row.id, createdAt: row.createdAt, ...payload };
+}
+
 export async function listTranscripts() {
+  const { userId } = getSession();
   const db = await openDb();
-  const items = await tx(db, 'transcripts', 'readonly', (store) => store.getAll());
+  const rows = await tx(db, 'transcripts', 'readonly', (store) => store.getAll());
+  const items = [];
+  for (const row of rows) {
+    if (row.owner !== userId || !row.ciphertext) continue;
+    try {
+      items.push(await decryptTranscriptRow(row));
+    } catch (e) {
+      console.warn('Skipping undecryptable transcript', row.id, e);
+    }
+  }
   items.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   return items;
 }
 
 export async function getTranscript(id) {
+  const { userId } = getSession();
   const db = await openDb();
-  return tx(db, 'transcripts', 'readonly', (store) => store.get(id));
+  const row = await tx(db, 'transcripts', 'readonly', (store) => store.get(id));
+  if (!row || row.owner !== userId || !row.ciphertext) return null;
+  return decryptTranscriptRow(row);
 }
 
 export async function saveTranscript(entry) {
+  const { userId } = getSession();
   const db = await openDb();
-  await tx(db, 'transcripts', 'readwrite', (store) => store.put(entry));
+  const { id, createdAt, owner, iv: _iv, ciphertext: _ct, ...payload } = entry;
+  const { iv, ciphertext } = await encryptJSON(payload);
+  await tx(db, 'transcripts', 'readwrite', (store) => store.put({ id, owner: userId, createdAt, iv, ciphertext }));
   return entry;
 }
 
 export async function updateTranscript(id, patch) {
-  const db = await openDb();
-  const existing = await tx(db, 'transcripts', 'readonly', (store) => store.get(id));
+  const existing = await getTranscript(id);
   if (!existing) throw new Error('Transcript not found');
   const updated = { ...existing, ...patch, id };
-  await tx(db, 'transcripts', 'readwrite', (store) => store.put(updated));
+  await saveTranscript(updated);
   return updated;
 }
 
 export async function deleteTranscript(id) {
+  const { userId } = getSession();
   const db = await openDb();
-  const existing = await tx(db, 'transcripts', 'readonly', (store) => store.get(id));
+  const row = await tx(db, 'transcripts', 'readonly', (store) => store.get(id));
+  if (!row) return;
+  if (row.owner !== userId) throw new Error('Transcript belongs to another user');
+  let recordingId = null;
+  try {
+    const payload = await decryptJSON(row.iv, row.ciphertext);
+    recordingId = payload.recordingId || null;
+  } catch (_) { /* corrupt record: still delete the row itself */ }
   await tx(db, 'transcripts', 'readwrite', (store) => store.delete(id));
-  if (existing && existing.recordingId) {
-    await deleteRecording(existing.recordingId);
-  }
+  if (recordingId) await deleteRecording(recordingId);
 }
 
+// --- Recordings ---
+// Stored shape: { id, owner, mimeType, iv, ciphertext }
+
 export async function saveRecording(id, blob, mimeType) {
+  const { userId } = getSession();
   const db = await openDb();
-  await tx(db, 'recordings', 'readwrite', (store) => store.put({ id, blob, mimeType: mimeType || blob.type || 'audio/webm' }));
+  const type = mimeType || blob.type || 'audio/webm';
+  const { iv, ciphertext } = await encryptBlob(blob);
+  await tx(db, 'recordings', 'readwrite', (store) => store.put({ id, owner: userId, mimeType: type, iv, ciphertext }));
   return id;
 }
 
 export async function getRecording(id) {
+  const { userId } = getSession();
   const db = await openDb();
-  return tx(db, 'recordings', 'readonly', (store) => store.get(id));
+  const row = await tx(db, 'recordings', 'readonly', (store) => store.get(id));
+  if (!row || row.owner !== userId || !row.ciphertext) return null;
+  try {
+    const blob = await decryptBlob(row.iv, row.ciphertext, row.mimeType);
+    return { id: row.id, blob, mimeType: row.mimeType };
+  } catch (e) {
+    console.warn('Could not decrypt recording', id, e);
+    return null;
+  }
 }
 
 export async function deleteRecording(id) {
+  const { userId } = getSession();
   const db = await openDb();
+  const row = await tx(db, 'recordings', 'readonly', (store) => store.get(id));
+  if (!row) return;
+  if (row.owner && row.owner !== userId) throw new Error('Recording belongs to another user');
   await tx(db, 'recordings', 'readwrite', (store) => store.delete(id));
 }
 
-// --- Form template (clinician-editable field list) ---
+// --- Form template (clinician-editable field list, per user) ---
+// Stored shape: { key: 'formTemplate:<userId>', iv, ciphertext }
+
+function templateKey(userId) {
+  return 'formTemplate:' + userId;
+}
 
 export async function getFormTemplate() {
+  const { userId } = getSession();
   const db = await openDb();
-  const entry = await tx(db, 'settings', 'readonly', (store) => store.get('formTemplate'));
-  return entry ? entry.fields : null;
+  const row = await tx(db, 'settings', 'readonly', (store) => store.get(templateKey(userId)));
+  if (!row || !row.ciphertext) return null;
+  try {
+    return await decryptJSON(row.iv, row.ciphertext);
+  } catch (e) {
+    console.warn('Could not decrypt form template', e);
+    return null;
+  }
 }
 
 export async function saveFormTemplate(fields) {
+  const { userId } = getSession();
   const db = await openDb();
-  await tx(db, 'settings', 'readwrite', (store) => store.put({ key: 'formTemplate', fields }));
+  const { iv, ciphertext } = await encryptJSON(fields);
+  await tx(db, 'settings', 'readwrite', (store) => store.put({ key: templateKey(userId), iv, ciphertext }));
   return fields;
+}
+
+// --- Legacy migration ---
+// Records written before the login feature have no `owner` field and are
+// plaintext. On the first login after the upgrade, they are encrypted under
+// that user and the plaintext is overwritten, so no unencrypted patient data
+// remains in the browser. Returns the number of migrated items.
+
+export async function migrateLegacyData() {
+  const { userId } = getSession();
+  const db = await openDb();
+  let migrated = 0;
+
+  const transcriptRows = await tx(db, 'transcripts', 'readonly', (store) => store.getAll());
+  for (const row of transcriptRows) {
+    if (row.owner) continue;
+    const { id, createdAt, ...payload } = row;
+    const { iv, ciphertext } = await encryptJSON(payload);
+    await tx(db, 'transcripts', 'readwrite', (store) => store.put({ id, owner: userId, createdAt, iv, ciphertext }));
+    migrated++;
+  }
+
+  const recordingRows = await tx(db, 'recordings', 'readonly', (store) => store.getAll());
+  for (const row of recordingRows) {
+    if (row.owner || !row.blob) continue;
+    const type = row.mimeType || row.blob.type || 'audio/webm';
+    const { iv, ciphertext } = await encryptBlob(row.blob);
+    await tx(db, 'recordings', 'readwrite', (store) => store.put({ id: row.id, owner: userId, mimeType: type, iv, ciphertext }));
+    migrated++;
+  }
+
+  const legacyTemplate = await tx(db, 'settings', 'readonly', (store) => store.get('formTemplate'));
+  if (legacyTemplate && Array.isArray(legacyTemplate.fields)) {
+    await saveFormTemplate(legacyTemplate.fields);
+    await tx(db, 'settings', 'readwrite', (store) => store.delete('formTemplate'));
+    migrated++;
+  }
+
+  return migrated;
 }

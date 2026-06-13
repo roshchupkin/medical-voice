@@ -1,6 +1,14 @@
 import * as db from './db.js';
+import * as auth from './auth.js';
 
 // --- DOM ---
+const loginOverlay = document.getElementById('loginOverlay');
+const loginForm = document.getElementById('loginForm');
+const loginUsername = document.getElementById('loginUsername');
+const loginPassword = document.getElementById('loginPassword');
+const loginSubmitBtn = document.getElementById('loginSubmitBtn');
+const loginError = document.getElementById('loginError');
+const lockBtn = document.getElementById('lockBtn');
 const engineBadge = document.getElementById('engineBadge');
 const modelStatus = document.getElementById('modelStatus');
 const progressWrap = document.getElementById('progressWrap');
@@ -269,11 +277,14 @@ transcribeBtn.addEventListener('click', async () => {
   setLoading('Preparing audio…');
   try {
     const text = await runTranscription(currentAudioBlob, (partial) => {
+      if (!auth.isUnlocked()) return;
       resultEl.textContent = partial;
       resultEl.className = 'loading';
     });
+    if (!auth.isUnlocked()) return;
     setResult(text);
   } catch (err) {
+    if (!auth.isUnlocked()) return;
     setResult('Transcription failed: ' + err.message, true);
   } finally {
     isTranscribing = false;
@@ -604,13 +615,16 @@ detailRetranscribeBtn.addEventListener('click', async () => {
   detailContent.textContent = 'Re-transcribing…';
   try {
     const text = await runTranscription(rec.blob, (partial) => {
+      if (!auth.isUnlocked()) return;
       detailContent.textContent = partial;
     });
+    if (!auth.isUnlocked()) return;
     const updated = await db.updateTranscript(currentDetailTranscript.id, { text });
     currentDetailTranscript = updated;
     detailContent.textContent = text;
     showToast('Transcript updated.');
   } catch (e) {
+    if (!auth.isUnlocked()) return;
     detailContent.textContent = originalText;
     showToast('Re-transcription failed: ' + e.message);
   } finally {
@@ -650,6 +664,7 @@ function debounce(fn, ms) {
 
 // --- Template editor ---
 const persistTemplate = debounce(() => {
+  if (!auth.isUnlocked()) return;
   db.saveFormTemplate(templateFields).catch(() => showToast('Could not save form template.'));
 }, 600);
 
@@ -799,6 +814,7 @@ function extractInWorker(transcript, schema) {
 
 // --- Filled form rendering / persistence ---
 const persistFormToTranscript = debounce(() => {
+  if (!auth.isUnlocked()) return;
   if (!formSourceId || !currentFormData) return;
   db.updateTranscript(formSourceId, { form: { ...currentFormData } })
     .then((updated) => {
@@ -876,6 +892,7 @@ async function runFormFill(transcript, sourceId) {
 
   try {
     const { data, truncated } = await extractInWorker(text, schema);
+    if (!auth.isUnlocked()) return;
     // Keep template field order; coerce values to strings.
     const form = {};
     for (const name of Object.keys(schema.properties)) {
@@ -955,8 +972,121 @@ async function requestPersistentStorage() {
   }
 }
 
+// =====================================================================
+// Login / lock (see js/auth.js). All patient data in IndexedDB is
+// encrypted with a key derived from the password; locking drops the key
+// and wipes decrypted data from the screen and memory.
+// =====================================================================
+
+function isAppBusy() {
+  return isTranscribing || isExtracting ||
+    !!(mediaRecorder && (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused'));
+}
+
+function discardActiveRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.ondataavailable = null;
+    mediaRecorder.onstop = null;
+    mediaRecorder.onerror = null;
+    try { mediaRecorder.stop(); } catch (_) { /* already stopped */ }
+  }
+  recordingStream?.getTracks().forEach(t => t.stop());
+  recordingStream = null;
+  recordingChunks = [];
+  mediaRecorder = null;
+  if (recordingTimerInterval) { clearInterval(recordingTimerInterval); recordingTimerInterval = null; }
+  if (recordingLimitInterval) { clearInterval(recordingLimitInterval); recordingLimitInterval = null; }
+  recordBtn.textContent = 'Record';
+  recordBtn.classList.remove('stop');
+  recordingIndicator.classList.remove('visible');
+  pauseRecordBtn.style.display = 'none';
+  window.onbeforeunload = null;
+}
+
+function handleLocked() {
+  discardActiveRecording();
+
+  // Current (unsaved) transcript + audio
+  currentTranscriptText = '';
+  resultEl.textContent = 'Record or upload audio to transcribe.';
+  resultEl.className = '';
+  saveBtn.disabled = true;
+  downloadBtn.disabled = true;
+  fillFormBtn.disabled = true;
+  if (currentAudioObjectUrl) { URL.revokeObjectURL(currentAudioObjectUrl); currentAudioObjectUrl = null; }
+  currentAudioBlob = null;
+  recordedAudio.src = '';
+  recordedSection.classList.add('hidden');
+
+  // Detail view
+  if (detailAudioObjectUrl) { URL.revokeObjectURL(detailAudioObjectUrl); detailAudioObjectUrl = null; }
+  detailAudio.src = '';
+  detailDownloadAudioLink.href = '#';
+  currentDetailTranscript = null;
+  detailPanel.classList.add('hidden');
+  detailContent.textContent = '';
+  detailEditArea.value = '';
+  detailTitle.textContent = '—';
+  exitEditMode();
+
+  // Saved list, form data, and per-user template
+  savedListEl.innerHTML = '<li class="empty-state">Locked.</li>';
+  clearForm();
+  templateFields = DEFAULT_TEMPLATE.map(f => ({ ...f }));
+  templateFieldsEl.innerHTML = '';
+
+  // Back to the login screen
+  lockBtn.style.display = 'none';
+  loginError.textContent = '';
+  loginPassword.value = '';
+  loginOverlay.classList.remove('hidden');
+  loginUsername.focus();
+}
+
+async function onUnlocked() {
+  loginOverlay.classList.add('hidden');
+  lockBtn.style.display = '';
+  try {
+    const migrated = await db.migrateLegacyData();
+    if (migrated > 0) showToast(`Encrypted ${migrated} existing item(s) under your account.`);
+  } catch (e) {
+    console.warn('Legacy data migration failed', e);
+  }
+  loadTemplate();
+  loadSavedList();
+}
+
+loginForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const username = loginUsername.value;
+  const password = loginPassword.value;
+  if (!username.trim() || !password) return;
+  loginSubmitBtn.disabled = true;
+  loginError.textContent = '';
+  loginSubmitBtn.textContent = 'Checking…';
+  try {
+    const ok = await auth.login(username, password);
+    if (!ok) {
+      loginError.textContent = 'Access denied: invalid username or password.';
+      loginPassword.value = '';
+      loginPassword.focus();
+      return;
+    }
+    loginPassword.value = '';
+    await onUnlocked();
+  } catch (err) {
+    loginError.textContent = 'Login failed: ' + (err.message || 'unknown error');
+  } finally {
+    loginSubmitBtn.disabled = false;
+    loginSubmitBtn.textContent = 'Unlock';
+  }
+});
+
+lockBtn.addEventListener('click', () => auth.lock());
+
+auth.configureAutoLock({ onLock: handleLocked, isBusy: isAppBusy });
+
 // --- Init ---
 initLlmSupport();
-loadTemplate();
-loadSavedList();
 requestPersistentStorage();
+loginUsername.focus();

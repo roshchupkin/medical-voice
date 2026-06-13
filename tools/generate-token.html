@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Whisper – Access Token Generator (admin only)</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f0f2f5;
+      color: #1a1a1a;
+      margin: 0;
+      padding: 2rem 1rem;
+      line-height: 1.5;
+    }
+    .card {
+      max-width: 640px;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      padding: 2rem;
+    }
+    h1 { font-size: 1.3rem; margin: 0 0 0.25rem; }
+    .warn {
+      background: #fff3cd;
+      border: 1px solid #ffc107;
+      border-radius: 6px;
+      padding: 0.6rem 0.9rem;
+      font-size: 0.88rem;
+      margin: 1rem 0;
+    }
+    label { display: block; font-size: 0.85rem; font-weight: 600; margin-top: 0.85rem; }
+    input {
+      width: 100%;
+      margin-top: 0.25rem;
+      padding: 0.6rem 0.7rem;
+      border: 1px solid #dee2e6;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      font-family: inherit;
+    }
+    button {
+      margin-top: 1.25rem;
+      padding: 0.6rem 1.2rem;
+      border-radius: 6px;
+      border: 1px solid #0d6efd;
+      background: #0d6efd;
+      color: #fff;
+      font-size: 0.95rem;
+      font-family: inherit;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    .output { margin-top: 1.5rem; display: none; }
+    .output.visible { display: block; }
+    .output h2 { font-size: 1rem; margin: 0 0 0.5rem; }
+    pre {
+      background: #f0f2f5;
+      border-radius: 6px;
+      padding: 0.85rem;
+      font-size: 0.82rem;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .status { font-size: 0.88rem; color: #5c5c5c; min-height: 1.3em; margin-top: 0.75rem; }
+    .status.ok { color: #14692d; }
+    .status.error { color: #dc3545; }
+    .hint { font-size: 0.85rem; color: #5c5c5c; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Access token generator</h1>
+    <p class="hint">Creates the anonymous token for a clinician's username + password, using the exact same derivation as the login screen.</p>
+    <div class="warn">
+      Admin tool — run it locally only. Do not deploy the <code>tools/</code> folder to the shared workstation, and generate tokens on a trusted machine.
+    </div>
+    <form id="genForm">
+      <label>Username
+        <input type="text" id="username" autocomplete="off" required>
+      </label>
+      <label>Password
+        <input type="text" id="password" autocomplete="off" required>
+      </label>
+      <button type="submit" id="genBtn">Generate token</button>
+      <p class="status" id="status"></p>
+    </form>
+    <div class="output" id="output">
+      <h2>Token (paste into <code>js/config.js</code> &rarr; <code>APPROVED_ACCESS_TOKENS</code>)</h2>
+      <pre id="tokenLine"></pre>
+      <p class="hint">If this token is already in the list, these credentials are valid. The clinician's data is keyed to the username — changing either username or password later means old encrypted data cannot be decrypted.</p>
+    </div>
+  </div>
+
+  <script type="module">
+    import { deriveCredentials } from '../js/auth.js';
+    import { APPROVED_ACCESS_TOKENS } from '../js/config.js';
+
+    const form = document.getElementById('genForm');
+    const genBtn = document.getElementById('genBtn');
+    const statusEl = document.getElementById('status');
+    const output = document.getElementById('output');
+    const tokenLine = document.getElementById('tokenLine');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+      genBtn.disabled = true;
+      statusEl.textContent = 'Deriving (intentionally slow, ~1s)…';
+      statusEl.className = 'status';
+      output.classList.remove('visible');
+      try {
+        const { authToken } = await deriveCredentials(username, password);
+        tokenLine.textContent = `'${authToken}',`;
+        output.classList.add('visible');
+        if (APPROVED_ACCESS_TOKENS.includes(authToken)) {
+          statusEl.textContent = 'This token is already in config.js — these credentials can log in.';
+          statusEl.className = 'status ok';
+        } else {
+          statusEl.textContent = 'Done. Add the line below to APPROVED_ACCESS_TOKENS and redeploy.';
+          statusEl.className = 'status ok';
+        }
+      } catch (err) {
+        statusEl.textContent = 'Failed: ' + err.message;
+        statusEl.className = 'status error';
+      } finally {
+        genBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

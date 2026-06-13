@@ -24,13 +24,30 @@ Then open http://localhost:8000. The microphone only works on `localhost` or HTT
 - **Storage**: transcripts and their audio live in IndexedDB on this device only. Unsaved recordings are kept in memory and lost on refresh.
 - **Form filling**: the "Fill form" button feeds the transcript to `Qwen2.5-1.5B-Instruct` (4-bit, ~900 MB, downloaded on first use then cached) running in a Web Worker via Web-LLM. The model is forced into JSON-schema mode at temperature 0, so it can only output the fields defined in the editable template; empty fields stay empty rather than being invented. Filled forms are stored with their transcript, included in `.txt` downloads, and exportable as `.json`. Requires WebGPU — without it the button is disabled and transcription still works.
 
+## Login and encryption
+
+The app is multi-user without any server. Each clinician logs in with a username + password; from these the browser derives (PBKDF2, 600k iterations, then HKDF):
+
+- an **anonymous auth token**, checked against the list in `js/config.js` — that file contains no usernames or password hashes, only opaque tokens, and is safe to expose;
+- an **AES-GCM key**, kept in memory only, which encrypts all transcripts, recordings, and form data in IndexedDB. Without logging in, the database contains only ciphertext. Each user sees only their own data.
+
+Managing accounts: serve the app locally, open `tools/generate-token.html`, enter the clinician's username and password, and paste the generated token into `APPROVED_ACCESS_TOKENS` in `js/config.js`. To revoke access, remove the token. Do not deploy the `tools/` folder to shared workstations.
+
+A default demo account ships in `config.js` (username `demo`, password `whisper-demo`) — **replace it before real use**.
+
+The app auto-locks after 5 minutes of inactivity (configurable in `js/config.js`); active recording or transcription does not count as inactivity. A forgotten password means that user's data is unrecoverable — there is no backdoor. Note: this protects confidentiality of stored data; it does not stop someone with machine access from deleting the database or tampering with the served files.
+
 ## Files
 
-- `index.html` – UI
-- `js/app.js` – recording, upload, audio decoding (16 kHz mono), worker messaging, form template/filling UI, IndexedDB wiring
+- `index.html` – UI, including the login overlay
+- `js/app.js` – recording, upload, audio decoding (16 kHz mono), worker messaging, form template/filling UI, IndexedDB wiring, login/lock UI flow
 - `js/worker.js` – Web Worker running the Whisper pipeline (Transformers.js 3.8.1 from jsdelivr CDN)
 - `js/llm-worker.js` – Web Worker running the form-filling LLM (Web-LLM 0.2.84 from esm.run CDN)
-- `js/db.js` – IndexedDB wrapper (transcripts, recordings, form template)
+- `js/db.js` – IndexedDB wrapper (transcripts, recordings, form template), encrypted at rest per user
+- `js/auth.js` – PBKDF2/HKDF key derivation, session state, inactivity auto-lock
+- `js/crypto-store.js` – AES-GCM encrypt/decrypt helpers
+- `js/config.js` – approved access tokens + security tuning (safe to expose)
+- `tools/generate-token.html` – admin-only token generator (do not deploy)
 
 ## Notes
 

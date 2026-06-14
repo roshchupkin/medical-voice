@@ -1,5 +1,6 @@
 import * as db from './db.js';
 import * as auth from './auth.js';
+import { DEFAULT_MODEL, DEFAULT_LANGUAGE } from './config.js';
 
 // --- DOM ---
 const loginOverlay = document.getElementById('loginOverlay');
@@ -1087,6 +1088,10 @@ lockBtn.addEventListener('click', () => auth.lock());
 auth.configureAutoLock({ onLock: handleLocked, isBusy: isAppBusy });
 
 // --- Init ---
+if ([...modelSelect.options].some(o => o.value === DEFAULT_MODEL)) {
+  modelSelect.value = DEFAULT_MODEL;
+}
+languageSelect.value = DEFAULT_LANGUAGE;
 initLlmSupport();
 requestPersistentStorage();
 loginUsername.focus();

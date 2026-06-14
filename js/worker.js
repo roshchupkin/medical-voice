@@ -50,9 +50,14 @@ async function loadModel(modelId) {
   await detectDevice();
   self.postMessage({ type: 'device', device });
 
+  // Use 4-bit weights to keep memory low enough for the large multilingual
+  // models. The fp16/fp32 encoders are 1.2-2.4 GB and overflow the download
+  // buffer on limited-RAM machines; the q4f16 encoder is ~350 MB. On WebGPU we
+  // use q4f16 (4-bit weights, fp16 activations); on the WASM/CPU fallback we use
+  // plain q4 since fp16 activations are not well supported there.
   const buildOptions = (dev) => dev === 'webgpu'
-    ? { device: 'webgpu', dtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' }, progress_callback: progressCallback }
-    : { device: 'wasm', dtype: 'q8', progress_callback: progressCallback };
+    ? { device: 'webgpu', dtype: { encoder_model: 'q4f16', decoder_model_merged: 'q4f16' }, progress_callback: progressCallback }
+    : { device: 'wasm', dtype: { encoder_model: 'q4', decoder_model_merged: 'q4' }, progress_callback: progressCallback };
 
   try {
     transcriber = await pipeline('automatic-speech-recognition', modelId, buildOptions(device));

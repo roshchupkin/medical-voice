@@ -22,3 +22,12 @@ export const PBKDF2_ITERATIONS = 600000;
 // Inactivity auto-lock, in minutes. Active recording/transcription does not
 // count as inactivity.
 export const AUTO_LOCK_MINUTES = 5;
+
+// Default Whisper model (multilingual). Options offered in the UI:
+//   'onnx-community/whisper-large-v3-turbo' — fast + accurate (default)
+//   'Xenova/whisper-medium'                 — lighter, for weaker PCs
+//   'Xenova/whisper-large-v3'               — best accuracy, needs a strong GPU
+export const DEFAULT_MODEL = 'onnx-community/whisper-large-v3-turbo';
+
+// Default transcription language ('nl' = Dutch). Set to 'en' for English.
+export const DEFAULT_LANGUAGE = 'nl';

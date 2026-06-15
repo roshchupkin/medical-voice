@@ -1,6 +1,15 @@
 import * as db from './db.js';
 import * as auth from './auth.js';
 import { DEFAULT_MODEL, DEFAULT_LANGUAGE } from './config.js';
+import { splitIntoSegments } from './segments.js';
+import * as correctionMemory from './correction-memory.js';
+import { findKnownTerms } from './clinical-lexicon.js';
+import { annotateTranscriptUncertainty } from './uncertainty.js';
+import { generateFinalReviewedTranscript, buildEditLog } from './final-transcript.js';
+import { createReviewUI } from './review-ui.js';
+import { createFormReviewUI, exportFinalForm, normalizePipelineForm } from './form-review-ui.js';
+import { assertFormGenerationAllowed } from './safety.js';
+import { probeWebGpuAvailable } from './webgpu-probe.js';
 
 // --- DOM ---
 const loginOverlay = document.getElementById('loginOverlay');
@@ -44,7 +53,7 @@ const detailAudio = document.getElementById('detailAudio');
 const detailRetranscribeBtn = document.getElementById('detailRetranscribeBtn');
 const detailDownloadAudioLink = document.getElementById('detailDownloadAudioLink');
 const toastEl = document.getElementById('toast');
-const fillFormBtn = document.getElementById('fillFormBtn');
+const reviewBtn = document.getElementById('reviewBtn');
 const detailFillFormBtn = document.getElementById('detailFillFormBtn');
 const llmStatus = document.getElementById('llmStatus');
 const llmProgressWrap = document.getElementById('llmProgressWrap');
@@ -52,22 +61,29 @@ const llmProgressBar = document.getElementById('llmProgressBar');
 const templateFieldsEl = document.getElementById('templateFields');
 const addFieldBtn = document.getElementById('addFieldBtn');
 const resetTemplateBtn = document.getElementById('resetTemplateBtn');
-const formFieldsEl = document.getElementById('formFields');
-const downloadFormJsonBtn = document.getElementById('downloadFormJsonBtn');
-const formSourceHint = document.getElementById('formSourceHint');
+const reviewPanel = document.getElementById('reviewPanel');
+const reviewRoot = document.getElementById('reviewRoot');
+const formPanel = document.getElementById('formPanel');
+const formPanelStatus = document.getElementById('formPanelStatus');
+const formReviewRoot = document.getElementById('formReviewRoot');
 
 // --- State ---
 let currentTranscriptText = '';
 let currentAudioBlob = null;        // unsaved recording/upload kept in memory
 let currentAudioObjectUrl = null;
+let currentChunks = [];             // Whisper segment timestamps for the current transcript
 let currentDetailTranscript = null;
 let detailAudioObjectUrl = null;
 let isTranscribing = false;
-let currentFormData = null;   // { fieldName: value } or null
-let formSourceId = null;      // saved transcript id the form belongs to, or null for the current (unsaved) transcript
-let formBelongsToCurrent = false; // true when the form was filled from the current (left panel) transcript
-let isExtracting = false;
-let llmSupported = 'gpu' in navigator;
+let isExtracting = false;           // true during correction OR form filling
+let llmSupported = false;           // set by probeWebGpu() — needs a working adapter, not just navigator.gpu
+let llmUnavailableReason = '';
+
+// The staged pipeline currently under review/editing. One shared object drives
+// both the review panel and the form panel. See buildPipeline().
+//   { id, title, language, raw:{text,segments,modelId}, correction, annotations,
+//     edits, ruleApplications, finalTranscript, editLog, form }
+let pipeline = null;
 
 // --- Worker / model loading ---
 const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
@@ -117,7 +133,7 @@ worker.onmessage = (e) => {
     }
     case 'complete': {
       const job = pendingJobs.get(msg.id);
-      if (job) { pendingJobs.delete(msg.id); job.resolve(msg.text); }
+      if (job) { pendingJobs.delete(msg.id); job.resolve({ text: msg.text, chunks: msg.chunks || [] }); }
       break;
     }
     case 'error': {
@@ -210,7 +226,7 @@ function setResult(text, isError = false) {
   currentTranscriptText = isError ? '' : (text || '');
   saveBtn.disabled = !currentTranscriptText;
   downloadBtn.disabled = !currentTranscriptText;
-  fillFormBtn.disabled = !currentTranscriptText || !llmSupported || isExtracting;
+  reviewBtn.disabled = !currentTranscriptText || !llmSupported || isExtracting;
 }
 
 function setLoading(message) {
@@ -218,13 +234,25 @@ function setLoading(message) {
   resultEl.className = 'loading';
   saveBtn.disabled = true;
   downloadBtn.disabled = true;
-  fillFormBtn.disabled = true;
+  reviewBtn.disabled = true;
 }
 
-function showToast(message) {
+function showToast(message, durationMs = 2500) {
   toastEl.textContent = message;
   toastEl.classList.add('show');
-  setTimeout(() => toastEl.classList.remove('show'), 2500);
+  if (showToast._timer) clearTimeout(showToast._timer);
+  showToast._timer = setTimeout(() => {
+    toastEl.classList.remove('show');
+    showToast._timer = null;
+  }, durationMs);
+}
+
+function setFormPanelStatus(kind, message) {
+  if (!formPanelStatus) return;
+  formPanelStatus.className = 'form-panel-status' + (kind ? ' ' + kind : '');
+  formPanelStatus.textContent = message || '';
+  formPanelStatus.classList.toggle('hidden', !message);
+  if (formPanel) formPanel.classList.toggle('panel-attention', kind === 'success');
 }
 
 function downloadAsTxt(text, filename) {
@@ -277,12 +305,13 @@ transcribeBtn.addEventListener('click', async () => {
   transcribeBtn.disabled = true;
   setLoading('Preparing audio…');
   try {
-    const text = await runTranscription(currentAudioBlob, (partial) => {
+    const { text, chunks } = await runTranscription(currentAudioBlob, (partial) => {
       if (!auth.isUnlocked()) return;
       resultEl.textContent = partial;
       resultEl.className = 'loading';
     });
     if (!auth.isUnlocked()) return;
+    currentChunks = chunks || [];
     setResult(text);
   } catch (err) {
     if (!auth.isUnlocked()) return;
@@ -428,24 +457,34 @@ saveBtn.addEventListener('click', async () => {
   const title = (window.prompt('Title for this transcript (optional):', '') || '').trim() || 'Untitled';
   try {
     const id = crypto.randomUUID();
+    const raw = (pipeline && pipeline.id === null && pipeline.raw)
+      ? pipeline.raw
+      : { text, segments: splitIntoSegments(text, currentChunks), modelId: modelSelect.value };
     const entry = {
       id,
       title,
       text,
       language: languageSelect.value || 'auto',
       createdAt: new Date().toISOString(),
+      raw,
     };
     if (currentAudioBlob) {
       const recordingId = id + '.audio';
       await db.saveRecording(recordingId, currentAudioBlob, currentAudioBlob.type);
       entry.recordingId = recordingId;
     }
-    if (currentFormData && formBelongsToCurrent) {
-      entry.form = { ...currentFormData };
-      formSourceId = id;
-      updateFormSourceHint();
+    // Persist the review/form pipeline when it belongs to this (unsaved) transcript.
+    if (pipeline && pipeline.id === null) {
+      entry.correction = pipeline.correction;
+      entry.annotations = pipeline.annotations;
+      entry.edits = pipeline.edits;
+      entry.ruleApplications = pipeline.ruleApplications;
+      entry.finalTranscript = pipeline.finalTranscript;
+      entry.editLog = pipeline.editLog;
+      entry.form = pipeline.form;
     }
     await db.saveTranscript(entry);
+    if (pipeline && pipeline.id === null) { pipeline.id = id; pipeline.title = title; }
     showToast('Saved as "' + title + '".');
     loadSavedList();
   } catch (e) {
@@ -454,8 +493,7 @@ saveBtn.addEventListener('click', async () => {
 });
 
 downloadBtn.addEventListener('click', () => {
-  const form = (currentFormData && formBelongsToCurrent) ? currentFormData : null;
-  downloadAsTxt(transcriptWithFormText(currentTranscriptText, form), 'transcript.txt');
+  downloadAsTxt(buildTranscriptExportText(pipeline, currentTranscriptText), 'transcript.txt');
 });
 
 // --- Saved transcripts list ---
@@ -525,13 +563,14 @@ async function openTranscript(id) {
       detailAudio.src = '';
       detailDownloadAudioLink.href = '#';
     }
-    if (t.form && Object.keys(t.form).length) {
-      currentFormData = { ...t.form };
-      formSourceId = t.id;
-      formBelongsToCurrent = false;
-      renderForm();
+    // Restore any saved review/form pipeline so the clinician can continue.
+    if (t.correction || t.form) {
+      loadPipelineFromEntry(t);
+    } else {
+      resetPipelineUI();
     }
     detailPanel.classList.remove('hidden');
+    updateBusyButtons();
   } catch (e) {
     showToast('Could not open transcript.');
   }
@@ -545,7 +584,7 @@ async function removeTranscript(id) {
       detailPanel.classList.add('hidden');
       currentDetailTranscript = null;
     }
-    if (formSourceId === id) clearForm();
+    if (pipeline && pipeline.id === id) resetPipelineUI();
     loadSavedList();
   } catch (e) {
     showToast('Could not delete.');
@@ -556,6 +595,7 @@ backToListBtn.addEventListener('click', () => {
   detailPanel.classList.add('hidden');
   currentDetailTranscript = null;
   exitEditMode();
+  updateBusyButtons();
 });
 
 // --- Detail: edit / rename / download ---
@@ -602,7 +642,10 @@ detailRenameBtn.addEventListener('click', async () => {
 detailDownloadBtn.addEventListener('click', () => {
   if (!currentDetailTranscript) return;
   const t = currentDetailTranscript;
-  downloadAsTxt(transcriptWithFormText(t.text || '', t.form), (t.title || 'transcript').replace(/\s+/g, '_') + '.txt');
+  const text = (pipeline && pipeline.id === t.id)
+    ? buildTranscriptExportText(pipeline, t.text || '')
+    : buildTranscriptExportText(t, t.text || '');
+  downloadAsTxt(text, (t.title || 'transcript').replace(/\s+/g, '_') + '.txt');
 });
 
 // --- Detail: re-transcribe with currently selected model/language ---
@@ -615,15 +658,19 @@ detailRetranscribeBtn.addEventListener('click', async () => {
   const originalText = currentDetailTranscript.text || '';
   detailContent.textContent = 'Re-transcribing…';
   try {
-    const text = await runTranscription(rec.blob, (partial) => {
+    const { text, chunks } = await runTranscription(rec.blob, (partial) => {
       if (!auth.isUnlocked()) return;
       detailContent.textContent = partial;
     });
     if (!auth.isUnlocked()) return;
-    const updated = await db.updateTranscript(currentDetailTranscript.id, { text });
+    const raw = { text, segments: splitIntoSegments(text, chunks), modelId: modelSelect.value };
+    // A fresh transcription invalidates any prior correction/review/form.
+    const updated = await db.updateTranscript(currentDetailTranscript.id, {
+      text, raw, correction: null, annotations: null, edits: null, finalTranscript: null, editLog: null, form: null,
+    });
     currentDetailTranscript = updated;
     detailContent.textContent = text;
-    showToast('Transcript updated.');
+    showToast('Transcript updated. Re-run "Improve & review".');
   } catch (e) {
     if (!auth.isUnlocked()) return;
     detailContent.textContent = originalText;
@@ -742,11 +789,12 @@ function buildSchema() {
   return { type: 'object', properties, required };
 }
 
-// --- LLM worker (lazy: created on first "Fill form" click) ---
+// --- LLM worker (lazy: created on first "Improve & review" click) ---
+// One worker, one model instance, two tasks: 'correct' and 'extract'.
 let llmWorker = null;
 let llmModelReady = false;
-const pendingExtracts = new Map(); // id -> { resolve, reject }
-let extractCounter = 0;
+const pendingLlm = new Map(); // id -> { resolve, reject }
+let llmCounter = 0;
 
 function setLlmProgress(text, progress) {
   llmStatus.textContent = text;
@@ -766,38 +814,37 @@ function getLlmWorker() {
     const msg = e.data;
     switch (msg.type) {
       case 'progress':
-        setLlmProgress(msg.text || 'Loading form model…', msg.progress);
+        setLlmProgress(msg.text || 'Loading local assistant…', msg.progress);
         break;
       case 'ready':
         llmModelReady = true;
-        setLlmProgress('Form model ready: Qwen2.5 1.5B (cached for offline use).');
+        setLlmProgress('Local assistant ready: Qwen2.5 1.5B (cached for offline use).');
         break;
       case 'complete': {
-        const job = pendingExtracts.get(msg.id);
-        if (job) { pendingExtracts.delete(msg.id); job.resolve({ data: msg.data, truncated: msg.truncated }); }
+        const job = pendingLlm.get(msg.id);
+        if (job) { pendingLlm.delete(msg.id); job.resolve(msg); }
         break;
       }
       case 'error': {
-        const err = new Error(msg.message || 'Form model error');
-        if (msg.id !== undefined && pendingExtracts.has(msg.id)) {
-          const job = pendingExtracts.get(msg.id);
-          pendingExtracts.delete(msg.id);
+        const err = new Error(msg.message || 'Local assistant error');
+        if (msg.id !== undefined && pendingLlm.has(msg.id)) {
+          const job = pendingLlm.get(msg.id);
+          pendingLlm.delete(msg.id);
           job.reject(err);
         } else {
-          setLlmProgress('Form model error: ' + err.message);
+          setLlmProgress('Local assistant error: ' + err.message);
         }
         break;
       }
     }
   };
   llmWorker.onerror = (e) => {
-    const err = new Error(e.message || 'Form model worker failed');
-    setLlmProgress('Form model failed to start: ' + err.message);
-    for (const [id, job] of pendingExtracts) {
+    const err = new Error(e.message || 'Local assistant worker failed');
+    setLlmProgress('Local assistant failed to start: ' + err.message);
+    for (const [id, job] of pendingLlm) {
       job.reject(err);
-      pendingExtracts.delete(id);
+      pendingLlm.delete(id);
     }
-    // Allow a fresh worker on next attempt (e.g. after a network hiccup).
     llmWorker.terminate();
     llmWorker = null;
     llmModelReady = false;
@@ -805,155 +852,345 @@ function getLlmWorker() {
   return llmWorker;
 }
 
-function extractInWorker(transcript, schema) {
-  const id = ++extractCounter;
+function llmRequest(payload) {
+  const id = ++llmCounter;
   return new Promise((resolve, reject) => {
-    pendingExtracts.set(id, { resolve, reject });
-    getLlmWorker().postMessage({ type: 'extract', id, transcript, schema });
+    pendingLlm.set(id, { resolve, reject });
+    getLlmWorker().postMessage({ ...payload, id });
   });
 }
 
-// --- Filled form rendering / persistence ---
-const persistFormToTranscript = debounce(() => {
-  if (!auth.isUnlocked()) return;
-  if (!formSourceId || !currentFormData) return;
-  db.updateTranscript(formSourceId, { form: { ...currentFormData } })
-    .then((updated) => {
-      if (currentDetailTranscript && currentDetailTranscript.id === updated.id) currentDetailTranscript = updated;
-    })
-    .catch(() => showToast('Could not save form changes.'));
+function correctInWorker(segments, protectedTerms, knownTerms) {
+  return llmRequest({ type: 'correct', segments, protectedTerms, knownTerms }).then((m) => m.result);
+}
+
+function extractInWorker(transcript, segments, schema) {
+  return llmRequest({ type: 'extract', transcript, segments, schema }).then((m) => ({ data: m.data, truncated: m.truncated }));
+}
+
+// =====================================================================
+// Staged pipeline: raw -> correction -> review -> final -> form -> approve.
+// =====================================================================
+
+const reviewUI = createReviewUI(reviewRoot, {
+  onChange: () => persistPipeline(),
+  onProceed: () => runGenerateForm(),
+  onNotify: (msg, ms) => showToast(msg, ms || 4000),
+  onAddRule: async (rule) => {
+    try {
+      if (rule.scope === 'session') correctionMemory.addSessionRule(rule);
+      else await correctionMemory.addPersistentRule(rule);
+      showToast('Correctieregel opgeslagen.');
+    } catch (_) {
+      showToast('Kon de regel niet opslaan.');
+    }
+  },
+});
+
+const formReviewUI = createFormReviewUI(formReviewRoot, {
+  onChange: () => persistPipeline(),
+  onApprove: () => { persistPipeline(); showToast('Formulier goedgekeurd.'); },
+  onExport: (p) => exportFinalForm(p),
+});
+
+const persistPipeline = debounce(() => {
+  if (!auth.isUnlocked() || !pipeline || !pipeline.id) return;
+  db.updateTranscript(pipeline.id, {
+    raw: pipeline.raw,
+    correction: pipeline.correction,
+    annotations: pipeline.annotations,
+    edits: pipeline.edits,
+    ruleApplications: pipeline.ruleApplications,
+    finalTranscript: pipeline.finalTranscript,
+    editLog: pipeline.editLog,
+    form: pipeline.form,
+  }).then((updated) => {
+    if (currentDetailTranscript && currentDetailTranscript.id === updated.id) currentDetailTranscript = updated;
+  }).catch(() => showToast('Could not save review changes.'));
 }, 600);
 
-function updateFormSourceHint() {
-  if (!currentFormData) { formSourceHint.textContent = ''; return; }
-  formSourceHint.textContent = formSourceId
-    ? 'This form is stored with its saved transcript. Edits are saved automatically.'
-    : 'This form belongs to the current transcript. Click "Save transcript" to store them together.';
+function buildPipeline({ id = null, title = '', language, text, segments }) {
+  return {
+    id, title, language,
+    raw: { text, segments, modelId: modelSelect.value },
+    correction: null, annotations: null, edits: {}, ruleApplications: [],
+    finalTranscript: null, editLog: null, form: null,
+  };
 }
 
-function renderForm() {
-  formFieldsEl.innerHTML = '';
-  if (!currentFormData) {
-    formFieldsEl.innerHTML = '<p class="empty-state">Transcribe audio, then click "Fill form" to extract data into these fields.</p>';
-    downloadFormJsonBtn.disabled = true;
-    updateFormSourceHint();
+function loadPipelineFromEntry(t) {
+  pipeline = {
+    id: t.id,
+    title: t.title || '',
+    language: t.language,
+    raw: (t.raw && Array.isArray(t.raw.segments)) ? t.raw : { text: t.text || '', segments: splitIntoSegments(t.text || '', []), modelId: t.raw ? t.raw.modelId : null },
+    correction: t.correction || null,
+    annotations: t.annotations || null,
+    edits: t.edits || {},
+    ruleApplications: t.ruleApplications || [],
+    finalTranscript: t.finalTranscript || null,
+    editLog: t.editLog || null,
+    form: normalizePipelineForm(t.form),
+  };
+  if (pipeline.correction) {
+    reviewPanel.classList.remove('hidden');
+    reviewUI.render(pipeline);
+  } else {
+    reviewPanel.classList.add('hidden');
+    reviewUI.clear();
+  }
+  if (pipeline.form) {
+    formPanel.classList.remove('hidden');
+    const n = (pipeline.form.fields && pipeline.form.fields.length) || 0;
+    setFormPanelStatus('success', `Saved form loaded (${n} field(s)). Review the filled values in the right column below.`);
+    formReviewUI.render(pipeline);
+  } else {
+    formPanel.classList.add('hidden');
+    formReviewUI.clear();
+    setFormPanelStatus('', '');
+  }
+}
+
+function resetPipelineUI() {
+  pipeline = null;
+  reviewUI.clear();
+  formReviewUI.clear();
+  reviewPanel.classList.add('hidden');
+  formPanel.classList.add('hidden');
+  setFormPanelStatus('', '');
+}
+
+function updateBusyButtons() {
+  reviewBtn.disabled = !currentTranscriptText || !llmSupported || isExtracting;
+  detailFillFormBtn.disabled = !llmSupported || isExtracting || !currentDetailTranscript;
+  reviewUI.setProceedBusy(isExtracting, isExtracting ? 'Formulier genereren…' : 'Genereer formulier');
+}
+
+function handleLlmError(err) {
+  const msg = err && err.message ? err.message : String(err || 'unknown error');
+  let statusMsg = 'Local assistant error: ' + msg;
+  if (/no webgpu adapter|webgpu is not available/i.test(msg)) {
+    statusMsg =
+      'Local assistant unavailable: no working WebGPU GPU adapter. ' +
+      'Fully restart the browser (especially after a prior GPU crash), use Chrome or Edge, update graphics drivers, ' +
+      'and check chrome://gpu. Transcription still works.';
+    llmSupported = false;
+    llmUnavailableReason = statusMsg;
+    updateBusyButtons();
+  } else if (/memory|allocat|device.*lost|device.*hung|dxgi/i.test(msg)) {
+    statusMsg += ' — your GPU may not have enough memory, or the GPU reset after a hang. Close other tabs, restart the browser, then try again.';
+  } else if (/fetch|network|download/i.test(msg)) {
+    statusMsg += ' — the model download may have been interrupted. Check your connection and try again.';
+  }
+  setLlmProgress(statusMsg);
+  showToast('AI-stap mislukt: ' + msg);
+}
+
+function dedupeProtected(list) {
+  const seen = new Set();
+  const out = [];
+  for (const p of list) {
+    const key = (p.term || '').toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}
+
+// Step 2-3: local rules -> LLM correction -> uncertainty annotation -> review.
+async function runCorrection() {
+  if (!pipeline || isExtracting) return;
+  if (!llmSupported) { showToast('Form/correction needs WebGPU (use a recent Chrome or Edge).'); return; }
+  isExtracting = true;
+  updateBusyButtons();
+  formPanel.classList.add('hidden');
+  formReviewUI.clear();
+  if (!llmModelReady) setLlmProgress('Loading local assistant (first use downloads ~900 MB, then cached)…');
+  showToast('Bezig met verbeteren van de transcriptie…');
+
+  try {
+    const rules = await correctionMemory.getActiveRules({ specialty: null });
+    const ruleApplications = [];
+    const protectedAll = [];
+    const inputSegments = pipeline.raw.segments.map((seg) => {
+      const { text, applied, protectedTerms } = correctionMemory.applyLocalCorrectionRules(seg.text, rules);
+      for (const a of applied) ruleApplications.push({ ...a, segment_id: seg.id, at: new Date().toISOString() });
+      for (const p of protectedTerms) protectedAll.push(p);
+      return { id: seg.id, text, asrConfidence: seg.asrConfidence };
+    });
+    pipeline.ruleApplications = ruleApplications;
+    const protectedTerms = dedupeProtected(protectedAll);
+    const knownTerms = findKnownTerms(inputSegments.map((s) => s.text).join(' '));
+
+    const result = await correctInWorker(inputSegments, protectedTerms, knownTerms);
+    if (!auth.isUnlocked()) return;
+
+    pipeline.correction = {
+      correctedText: result.corrected_transcript,
+      segments: result.segments,
+      globalWarnings: result.global_warnings,
+    };
+    pipeline.annotations = annotateTranscriptUncertainty(inputSegments, result.segments);
+    pipeline.edits = {};
+    pipeline.finalTranscript = null;
+    pipeline.editLog = null;
+    pipeline.form = null;
+
+    reviewPanel.classList.remove('hidden');
+    reviewUI.render(pipeline);
+    reviewPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    persistPipeline();
+    setLlmProgress('Local assistant ready: Qwen2.5 1.5B (cached for offline use).');
+    showToast('Transcriptie verbeterd. Beoordeel de gemarkeerde passages.');
+  } catch (err) {
+    if (!auth.isUnlocked()) return;
+    handleLlmError(err);
+  } finally {
+    isExtracting = false;
+    updateBusyButtons();
+  }
+}
+
+// Step 7-8: build final reviewed transcript, then fill the form from it only.
+async function runGenerateForm() {
+  if (!pipeline || !pipeline.correction) return;
+  if (isExtracting) {
+    showToast('Form generation is already in progress…', 3000);
     return;
   }
-  for (const [name, value] of Object.entries(currentFormData)) {
-    const wrap = document.createElement('div');
-    wrap.className = 'form-field';
-    const label = document.createElement('label');
-    label.textContent = name;
-    const area = document.createElement('textarea');
-    area.value = value || '';
-    area.addEventListener('input', () => {
-      currentFormData[name] = area.value;
-      if (formSourceId) persistFormToTranscript();
-    });
-    wrap.append(label, area);
-    formFieldsEl.appendChild(wrap);
+  try {
+    assertFormGenerationAllowed(pipeline.annotations);
+  } catch (e) {
+    showToast(e.message, 5000);
+    return;
   }
-  downloadFormJsonBtn.disabled = false;
-  updateFormSourceHint();
+  const schema = buildSchema();
+  if (!schema) { showToast('Add at least one form field to the template first.', 5000); return; }
+
+  isExtracting = true;
+  updateBusyButtons();
+
+  const final = generateFinalReviewedTranscript(pipeline.correction.segments, pipeline.edits);
+  pipeline.finalTranscript = final;
+  pipeline.editLog = buildEditLog(pipeline.correction.segments, pipeline.edits, pipeline.ruleApplications);
+
+  formPanel.classList.remove('hidden');
+  setFormPanelStatus('loading', 'Filling the form from your reviewed transcript… This can take a minute on first use while the local AI model loads.');
+  formReviewRoot.innerHTML = '<p class="empty-state loading">Extracting form data from the reviewed transcript…</p>';
+  if (!llmModelReady) setLlmProgress('Loading local assistant…');
+
+  try {
+    const { data, truncated } = await extractInWorker(final.text, final.segments, schema);
+    if (!auth.isUnlocked()) return;
+    pipeline.form = {
+      fields: data.fields,
+      missingFields: data.missing_fields,
+      overallWarnings: data.overall_warnings,
+      approvedAt: null,
+    };
+    formReviewUI.render(pipeline);
+    const filledCount = data.fields.filter((f) => f.value && f.value !== 'niet vermeld').length;
+    setFormPanelStatus(
+      'success',
+      `Form filled (${filledCount} of ${data.fields.length} fields have values). Review the fields in the right column below. ` +
+      'Click "Toon bron" on any field to see where its value came from in the transcript.',
+    );
+    formPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    persistPipeline();
+    if (truncated) showToast('Note: the transcript was very long and was truncated for extraction.', 6000);
+    setLlmProgress('Local assistant ready: Qwen2.5 1.5B (cached for offline use).');
+    showToast('Form filled — scroll to Step 3 below and review each field.', 7000);
+  } catch (err) {
+    if (!auth.isUnlocked()) return;
+    setFormPanelStatus('error', 'Form filling failed: ' + (err.message || 'unknown error') + '. See the message below, then try again.');
+    formReviewRoot.innerHTML = '<p class="empty-state error">Form filling failed: ' + escapeHtml(err.message || 'unknown error') + '</p>';
+    handleLlmError(err);
+  } finally {
+    isExtracting = false;
+    updateBusyButtons();
+  }
 }
 
-function clearForm() {
-  currentFormData = null;
-  formSourceId = null;
-  formBelongsToCurrent = false;
-  renderForm();
-}
-
-function formAsText(form) {
-  return Object.entries(form)
-    .map(([name, value]) => name + ':\n' + (value || '—'))
+// --- Export text helpers ---
+function formAsTextStructured(form) {
+  const normalized = normalizePipelineForm(form);
+  if (!normalized || !normalized.fields.length) return '';
+  return normalized.fields
+    .map((f) => `${f.field_name}:\n${f.value || '—'}${f.needs_review ? '  [controleer]' : ''}`)
     .join('\n\n');
 }
 
-function transcriptWithFormText(text, form) {
-  if (!form || !Object.keys(form).length) return text;
-  return text + '\n\n----- Medical form -----\n\n' + formAsText(form);
-}
-
-// --- Extraction flow ---
-async function runFormFill(transcript, sourceId) {
-  if (isExtracting) return;
-  const text = (transcript || '').trim();
-  if (!text) { showToast('Nothing to extract: transcript is empty.'); return; }
-  const schema = buildSchema();
-  if (!schema) { showToast('Add at least one form field to the template first.'); return; }
-
-  isExtracting = true;
-  fillFormBtn.disabled = true;
-  detailFillFormBtn.disabled = true;
-  if (!llmModelReady) setLlmProgress('Loading form model (first use downloads ~900 MB, then cached)…');
-  formFieldsEl.innerHTML = '<p class="empty-state loading">Extracting form data from transcript…</p>';
-  formSourceHint.textContent = '';
-  downloadFormJsonBtn.disabled = true;
-
-  try {
-    const { data, truncated } = await extractInWorker(text, schema);
-    if (!auth.isUnlocked()) return;
-    // Keep template field order; coerce values to strings.
-    const form = {};
-    for (const name of Object.keys(schema.properties)) {
-      const v = data ? data[name] : '';
-      form[name] = (v === null || v === undefined) ? '' : String(v);
-    }
-    currentFormData = form;
-    formSourceId = sourceId || null;
-    formBelongsToCurrent = !sourceId;
-    renderForm();
-    if (formSourceId) {
-      const updated = await db.updateTranscript(formSourceId, { form: { ...form } });
-      if (currentDetailTranscript && currentDetailTranscript.id === updated.id) currentDetailTranscript = updated;
-      showToast('Form filled and saved with the transcript.');
-    } else {
-      showToast('Form filled. Review the fields before use.');
-    }
-    if (truncated) showToast('Note: transcript was very long and was truncated for extraction.');
-    setLlmProgress('Form model ready: Qwen2.5 1.5B (cached for offline use).');
-  } catch (err) {
-    formFieldsEl.innerHTML = '<p class="empty-state error">Form filling failed: ' + escapeHtml(err.message || 'unknown error') + '</p>';
-    let statusMsg = 'Form model error: ' + (err.message || 'unknown error');
-    if (/memory|allocat|device.*lost/i.test(err.message || '')) {
-      statusMsg += ' — your GPU may not have enough memory for this model. Close other tabs and try again.';
-    } else if (/fetch|network|download/i.test(err.message || '')) {
-      statusMsg += ' — the model download may have been interrupted. Check your connection and try again.';
-    }
-    setLlmProgress(statusMsg);
-  } finally {
-    isExtracting = false;
-    fillFormBtn.disabled = !currentTranscriptText || !llmSupported;
-    detailFillFormBtn.disabled = !llmSupported;
+function buildTranscriptExportText(p, fallbackText) {
+  if (!p) return fallbackText || '';
+  const parts = [];
+  const raw = (p.raw && p.raw.text) || fallbackText || '';
+  parts.push('===== Ruwe transcriptie (Whisper) =====\n' + raw);
+  if (p.finalTranscript && p.finalTranscript.text) {
+    parts.push('===== Definitieve gecontroleerde transcriptie =====\n' + p.finalTranscript.text);
+  } else if (p.correction && p.correction.correctedText) {
+    parts.push('===== AI-gecorrigeerde transcriptie =====\n' + p.correction.correctedText);
   }
+  const formText = formAsTextStructured(p.form);
+  if (formText) {
+    parts.push('===== Medisch formulier =====\n' + formText);
+  }
+  return parts.join('\n\n');
 }
 
-fillFormBtn.addEventListener('click', () => runFormFill(currentTranscriptText, null));
+// --- Entry points: start review from the current or a saved transcript ---
+reviewBtn.addEventListener('click', () => {
+  const text = currentTranscriptText.trim();
+  if (!text) { showToast('Transcript is empty.'); return; }
+  pipeline = buildPipeline({
+    id: null,
+    title: '',
+    language: languageSelect.value || 'auto',
+    text,
+    segments: splitIntoSegments(text, currentChunks),
+  });
+  runCorrection();
+});
 
 detailFillFormBtn.addEventListener('click', () => {
   if (!currentDetailTranscript) return;
-  runFormFill(currentDetailTranscript.text, currentDetailTranscript.id);
-});
-
-downloadFormJsonBtn.addEventListener('click', () => {
-  if (!currentFormData) return;
-  const blob = new Blob([JSON.stringify(currentFormData, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'medical-form.json';
-  a.click();
-  URL.revokeObjectURL(a.href);
+  const t = currentDetailTranscript;
+  if (pipeline && pipeline.id === t.id && pipeline.correction) {
+    // Already loaded with a correction: re-run to refresh.
+    runCorrection();
+    return;
+  }
+  loadPipelineFromEntry(t);
+  if (!pipeline.correction) runCorrection();
 });
 
 function initLlmSupport() {
-  if (llmSupported) return;
-  fillFormBtn.disabled = true;
+  reviewBtn.disabled = true;
   detailFillFormBtn.disabled = true;
-  const reason = 'Form filling needs WebGPU, which this browser does not support. Use a recent Chrome or Edge.';
-  fillFormBtn.title = reason;
+  if (llmSupported) {
+    reviewBtn.title = '';
+    detailFillFormBtn.title = '';
+    return;
+  }
+  const reason = llmUnavailableReason ||
+    'Transcript correction and form filling need a working WebGPU GPU adapter. Use a recent Chrome or Edge.';
+  reviewBtn.title = reason;
   detailFillFormBtn.title = reason;
   llmStatus.textContent = reason + ' Transcription still works normally.';
+}
+
+async function probeWebGpu() {
+  llmStatus.textContent = 'Checking WebGPU for the local assistant…';
+  const { available, reason } = await probeWebGpuAvailable();
+  llmSupported = available;
+  llmUnavailableReason = reason || '';
+  if (llmSupported) {
+    llmStatus.textContent =
+      'The local assistant (Qwen2.5 1.5B, ~900 MB) downloads on first use, then is cached for offline use. Runs locally via WebGPU.';
+  } else {
+    initLlmSupport();
+  }
+  updateBusyButtons();
 }
 
 // Ask the browser to protect this site's storage (cached models, saved
@@ -1009,11 +1246,12 @@ function handleLocked() {
 
   // Current (unsaved) transcript + audio
   currentTranscriptText = '';
+  currentChunks = [];
   resultEl.textContent = 'Record or upload audio to transcribe.';
   resultEl.className = '';
   saveBtn.disabled = true;
   downloadBtn.disabled = true;
-  fillFormBtn.disabled = true;
+  reviewBtn.disabled = true;
   if (currentAudioObjectUrl) { URL.revokeObjectURL(currentAudioObjectUrl); currentAudioObjectUrl = null; }
   currentAudioBlob = null;
   recordedAudio.src = '';
@@ -1030,9 +1268,10 @@ function handleLocked() {
   detailTitle.textContent = '—';
   exitEditMode();
 
-  // Saved list, form data, and per-user template
+  // Saved list, pipeline (review + form), local session rules, and template
   savedListEl.innerHTML = '<li class="empty-state">Locked.</li>';
-  clearForm();
+  resetPipelineUI();
+  correctionMemory.clearSessionRules();
   templateFields = DEFAULT_TEMPLATE.map(f => ({ ...f }));
   templateFieldsEl.innerHTML = '';
 
@@ -1055,6 +1294,7 @@ async function onUnlocked() {
   }
   loadTemplate();
   loadSavedList();
+  probeWebGpu();
 }
 
 loginForm.addEventListener('submit', async (e) => {
@@ -1092,6 +1332,6 @@ if ([...modelSelect.options].some(o => o.value === DEFAULT_MODEL)) {
   modelSelect.value = DEFAULT_MODEL;
 }
 languageSelect.value = DEFAULT_LANGUAGE;
-initLlmSupport();
+probeWebGpu();
 requestPersistentStorage();
 loginUsername.focus();

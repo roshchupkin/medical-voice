@@ -5,8 +5,12 @@
 //               { type: 'progress', file, loaded, total }
 //               { type: 'ready', modelId, device }
 //               { type: 'partial', id, text }
-//               { type: 'complete', id, text }
+//               { type: 'complete', id, text, chunks }
 //               { type: 'error', id?, message }
+//
+// `chunks` carries segment-level timestamps ([{ text, timestamp: [start, end] }])
+// when the model produces them. They feed the heuristic ASR-confidence scoring
+// in js/segments.js. They are best-effort: some models/inputs return none.
 
 import { pipeline, WhisperTextStreamer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
 
@@ -88,16 +92,35 @@ async function transcribe({ id, audio, language }) {
       self.postMessage({ type: 'partial', id, text: partialText });
     },
   });
-  const output = await transcriber(audio, {
-    language: language || null,
-    task: 'transcribe',
-    chunk_length_s: 30,
-    stride_length_s: 5,
-    return_timestamps: false,
-    streamer,
-  });
+  let output;
+  try {
+    // Segment-level timestamps give us per-phrase timing for the heuristic
+    // confidence scoring without the instability of word-level timestamps.
+    output = await transcriber(audio, {
+      language: language || null,
+      task: 'transcribe',
+      chunk_length_s: 30,
+      stride_length_s: 5,
+      return_timestamps: true,
+      streamer,
+    });
+  } catch (err) {
+    // Some quantized models reject timestamp decoding; fall back to plain text.
+    output = await transcriber(audio, {
+      language: language || null,
+      task: 'transcribe',
+      chunk_length_s: 30,
+      stride_length_s: 5,
+      return_timestamps: false,
+      streamer,
+    });
+  }
   const text = (output && output.text ? output.text : '').trim();
-  self.postMessage({ type: 'complete', id, text: text || '(no speech detected)' });
+  const chunks = (output && Array.isArray(output.chunks)) ? output.chunks.map((c) => ({
+    text: c.text || '',
+    timestamp: Array.isArray(c.timestamp) ? c.timestamp : null,
+  })) : [];
+  self.postMessage({ type: 'complete', id, text: text || '(no speech detected)', chunks });
 }
 
 self.onmessage = async (e) => {

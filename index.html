@@ -295,6 +295,103 @@
       resize: vertical;
     }
     .form-actions { margin-top: 0.5rem; }
+    .llm-status-bar { margin-top: 1.5rem; }
+    .review-panel .hint { margin-top: -0.4rem; }
+    /* Review UI */
+    .review-banner {
+      background: var(--bg);
+      border-radius: var(--radius-sm);
+      padding: 0.75rem 1rem;
+      font-size: 0.92rem;
+      margin-bottom: 0.75rem;
+    }
+    .review-banner .banner-red { color: var(--danger); }
+    .review-warnings { font-size: 0.88rem; margin-bottom: 0.75rem; }
+    .review-warnings ul { margin: 0.25rem 0 0; padding-left: 1.2rem; }
+    .review-toolbar { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+    .review-legend { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-left: auto; }
+    .seg-chip { font-size: 0.78rem; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid var(--border); }
+    .seg-chip.seg-green { background: #d1f7e0; border-color: #28a745; color: #14692d; }
+    .seg-chip.seg-yellow { background: #fff3cd; border-color: #ffc107; color: #7a5c00; }
+    .seg-chip.seg-red { background: #f8d7da; border-color: var(--danger); color: #842029; }
+    .review-transcript {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.85rem;
+      line-height: 1.9;
+      font-size: 0.95rem;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .seg { border-radius: 3px; padding: 0.05rem 0.15rem; cursor: pointer; border-bottom: 2px solid transparent; }
+    .seg-green { background: rgba(40,167,69,0.12); }
+    .seg-yellow { background: rgba(255,193,7,0.22); }
+    .seg-red { background: rgba(220,53,69,0.18); }
+    .seg:hover { outline: 1px solid var(--text-muted); }
+    .seg-selected { outline: 2px solid var(--primary); }
+    .seg-confirmed { border-bottom-color: #28a745; }
+    .review-editor {
+      margin-top: 0.85rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.85rem;
+      background: var(--bg);
+    }
+    .review-editor.hidden, .tform-source.hidden { display: none; }
+    .editor-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
+    .editor-head button { margin-left: auto; padding: 0.3rem 0.6rem; font-size: 0.85rem; }
+    .editor-triggers { font-size: 0.8rem; color: var(--text-muted); }
+    .editor-reason { font-size: 0.85rem; color: var(--text-muted); margin: 0 0 0.5rem; }
+    .editor-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 0.5rem; }
+    @media (max-width: 700px) { .editor-compare { grid-template-columns: 1fr; } }
+    .editor-col-label { font-size: 0.78rem; font-weight: 600; color: var(--text-muted); margin-bottom: 0.2rem; }
+    .editor-col-text { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.5rem; font-size: 0.9rem; }
+    .editor-label { display: block; font-size: 0.8rem; font-weight: 600; margin: 0.4rem 0 0.2rem; }
+    .editor-textarea { width: 100%; min-height: 60px; border-radius: var(--radius-sm); border: 1px solid var(--border); padding: 0.5rem; font-family: inherit; font-size: 0.9rem; resize: vertical; }
+    .editor-note { width: 100%; margin-top: 0.4rem; padding: 0.45rem 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--border); font-family: inherit; font-size: 0.88rem; }
+    .editor-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    .editor-actions button { padding: 0.4rem 0.7rem; font-size: 0.88rem; }
+    .review-rule-box { margin-top: 0.85rem; font-size: 0.9rem; }
+    .review-rule-box summary { cursor: pointer; font-weight: 600; }
+    .rule-row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    .rule-row input, .rule-row select { padding: 0.4rem 0.55rem; border-radius: var(--radius-sm); border: 1px solid var(--border); font-family: inherit; font-size: 0.88rem; }
+    .review-proceed-row { margin-top: 1rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    .review-proceed-row .hint { margin: 0; }
+    /* Traceable form review */
+    .form-warnings { font-size: 0.88rem; margin-bottom: 0.5rem; }
+    .form-warnings ul, .form-missing ul { margin: 0.25rem 0 0; padding-left: 1.2rem; }
+    .form-missing { font-size: 0.88rem; color: var(--text-muted); margin-top: 0.5rem; }
+    .tform-field { margin-bottom: 0.85rem; padding: 0.6rem; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    .tform-field.needs-review { border-color: var(--danger); background: #fff8f8; }
+    .tform-label-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; flex-wrap: wrap; }
+    .tform-label-row label { font-size: 0.85rem; font-weight: 600; }
+    .tform-badges { display: flex; gap: 0.35rem; margin-left: auto; flex-wrap: wrap; }
+    .conf-badge { font-size: 0.74rem; padding: 0.08rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); }
+    .conf-badge.conf-high { background: #d1f7e0; border-color: #28a745; color: #14692d; }
+    .conf-badge.conf-medium { background: #fff3cd; border-color: #ffc107; color: #7a5c00; }
+    .conf-badge.conf-low { background: #f8d7da; border-color: var(--danger); color: #842029; }
+    .tform-flag { font-size: 0.74rem; padding: 0.08rem 0.45rem; border-radius: 999px; border: 1px solid var(--border); }
+    .tform-flag.review { background: #f8d7da; border-color: var(--danger); color: #842029; }
+    .tform-flag.inferred { background: var(--bg); color: var(--text-muted); }
+    .tform-value { width: 100%; min-height: 48px; border-radius: var(--radius-sm); border: 1px solid var(--border); padding: 0.5rem; font-family: inherit; font-size: 0.9rem; resize: vertical; }
+    .tform-warning { font-size: 0.82rem; color: var(--danger); margin: 0.3rem 0; }
+    .tform-source { margin-top: 0.4rem; background: var(--bg); border-radius: var(--radius-sm); padding: 0.5rem; }
+    .trace-row { display: grid; grid-template-columns: 160px 1fr; gap: 0.5rem; font-size: 0.85rem; padding: 0.15rem 0; }
+    .trace-label { color: var(--text-muted); font-weight: 600; }
+    .form-approval-status { font-size: 0.88rem; color: var(--text-muted); }
+    .form-approval-status.approved { color: #14692d; font-weight: 600; }
+    .form-panel-status {
+      border-radius: var(--radius-sm);
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      font-size: 0.92rem;
+    }
+    .form-panel-status.hidden { display: none; }
+    .form-panel-status.loading { background: #e8f4fd; border: 1px solid #b6d4fe; color: #084298; }
+    .form-panel-status.success { background: #d1f7e0; border: 1px solid #28a745; color: #14692d; }
+    .form-panel-status.error { background: #f8d7da; border: 1px solid var(--danger); color: #842029; }
+    .panel-attention { box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.35); }
     /* Toast */
     .toast {
       position: fixed;
@@ -425,7 +522,7 @@
         <div class="transcript-actions">
           <button type="button" id="saveBtn" class="primary" disabled>Save transcript</button>
           <button type="button" id="downloadBtn" disabled>Download .txt</button>
-          <button type="button" id="fillFormBtn" disabled>Fill form</button>
+          <button type="button" id="reviewBtn" disabled title="Improve the transcript and review uncertain passages before filling the form">Improve &amp; review</button>
         </div>
       </div>
 
@@ -457,19 +554,29 @@
             <button type="button" id="detailCancelEditBtn" style="display:none;">Cancel</button>
             <button type="button" id="detailRenameBtn">Rename</button>
             <button type="button" id="detailDownloadBtn">Download .txt</button>
-            <button type="button" id="detailFillFormBtn">Fill form</button>
+            <button type="button" id="detailFillFormBtn">Improve &amp; review</button>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- Section C: Medical form (local LLM) -->
-    <div class="panel form-panel">
-      <h2>Medical form</h2>
-      <div class="llm-status-row">
-        <span class="model-status" id="llmStatus">The form-filling model (Qwen2.5 1.5B, ~900 MB) downloads on first use, then is cached for offline use. Runs locally via WebGPU.</span>
-        <div class="progress-wrap" id="llmProgressWrap"><div class="progress-bar" id="llmProgressBar"></div></div>
-      </div>
+    <!-- Local AI status (shared by the correction + form-filling model) -->
+    <div class="status-bar llm-status-bar">
+      <span>AI-model: <span class="model-status" id="llmStatus">The local assistant (Qwen2.5 1.5B, ~900 MB) downloads on first use, then is cached for offline use. Runs locally via WebGPU.</span></span>
+      <div class="progress-wrap" id="llmProgressWrap"><div class="progress-bar" id="llmProgressBar"></div></div>
+    </div>
+
+    <!-- Step 2: Review & correct transcript -->
+    <div class="panel form-panel review-panel hidden" id="reviewPanel">
+      <h2>Step 2 — Review &amp; correct transcript</h2>
+      <p class="hint">The AI improves spelling, grammar and clear recognition errors without changing clinical meaning. Uncertain passages are flagged. Review every red passage before generating the form.</p>
+      <div id="reviewRoot"></div>
+    </div>
+
+    <!-- Step 3: Medical form -->
+    <div class="panel form-panel hidden" id="formPanel">
+      <h2>Step 3 — Medical form</h2>
+      <div id="formPanelStatus" class="form-panel-status hidden" aria-live="polite"></div>
       <div class="form-grid">
         <div>
           <h3>Form fields (template)</h3>
@@ -478,15 +585,11 @@
             <button type="button" id="addFieldBtn">Add field</button>
             <button type="button" id="resetTemplateBtn">Reset to default</button>
           </div>
-          <p class="hint">Define which fields the AI should fill from the transcript. The hint tells the model what to extract. Changes are saved automatically.</p>
+          <p class="hint">Define which fields the AI should fill from the reviewed transcript. The hint tells the model what to extract. Changes are saved automatically.</p>
         </div>
         <div>
           <h3>Filled form</h3>
-          <div id="formFields"><p class="empty-state">Transcribe audio, then click "Fill form" to extract data into these fields.</p></div>
-          <div class="row form-actions">
-            <button type="button" id="downloadFormJsonBtn" disabled>Download .json</button>
-          </div>
-          <p class="hint" id="formSourceHint"></p>
+          <div id="formReviewRoot"><p class="empty-state">Review the transcript, then click "Genereer formulier" to fill these fields with source traceability.</p></div>
         </div>
       </div>
     </div>

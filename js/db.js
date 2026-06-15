@@ -11,7 +11,7 @@ import { getSession } from './auth.js';
 import { encryptJSON, decryptJSON, encryptBlob, decryptBlob } from './crypto-store.js';
 
 const DB_NAME = 'whisper-local';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 let dbPromise = null;
 
@@ -34,6 +34,15 @@ function openDb() {
       }
       if (!db.objectStoreNames.contains('settings')) {
         db.createObjectStore('settings', { keyPath: 'key' });
+      }
+      // v4: local correction memory + medical dictionaries (encrypted per user).
+      if (!db.objectStoreNames.contains('correctionRules')) {
+        const store = db.createObjectStore('correctionRules', { keyPath: 'id' });
+        store.createIndex('owner', 'owner');
+      }
+      if (!db.objectStoreNames.contains('dictionaries')) {
+        const store = db.createObjectStore('dictionaries', { keyPath: 'id' });
+        store.createIndex('owner', 'owner');
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -225,4 +234,83 @@ export async function migrateLegacyData() {
   }
 
   return migrated;
+}
+
+// --- Correction rules (local correction memory, per user) ---
+// Stored shape: { id, owner, iv, ciphertext }
+// Decrypted payload: { id, scope, specialty?, from, to, mode, note, createdAt }
+
+export async function listCorrectionRules() {
+  const { userId } = getSession();
+  const db = await openDb();
+  const rows = await tx(db, 'correctionRules', 'readonly', (store) => store.getAll());
+  const items = [];
+  for (const row of rows) {
+    if (row.owner !== userId || !row.ciphertext) continue;
+    try {
+      items.push({ id: row.id, ...(await decryptJSON(row.iv, row.ciphertext)) });
+    } catch (e) {
+      console.warn('Skipping undecryptable correction rule', row.id, e);
+    }
+  }
+  items.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+  return items;
+}
+
+export async function saveCorrectionRule(rule) {
+  const { userId } = getSession();
+  const db = await openDb();
+  const id = rule.id || crypto.randomUUID();
+  const { id: _id, owner: _o, iv: _iv, ciphertext: _ct, ...payload } = rule;
+  const { iv, ciphertext } = await encryptJSON({ ...payload, id });
+  await tx(db, 'correctionRules', 'readwrite', (store) => store.put({ id, owner: userId, iv, ciphertext }));
+  return { id, ...payload };
+}
+
+export async function deleteCorrectionRule(id) {
+  const { userId } = getSession();
+  const db = await openDb();
+  const row = await tx(db, 'correctionRules', 'readonly', (store) => store.get(id));
+  if (!row) return;
+  if (row.owner !== userId) throw new Error('Rule belongs to another user');
+  await tx(db, 'correctionRules', 'readwrite', (store) => store.delete(id));
+}
+
+// --- Medical dictionary entries (per user) ---
+// Stored shape: { id, owner, iv, ciphertext }
+// Decrypted payload: { id, term, category, expansion?, specialty?, source }
+
+export async function listDictionaryEntries() {
+  const { userId } = getSession();
+  const db = await openDb();
+  const rows = await tx(db, 'dictionaries', 'readonly', (store) => store.getAll());
+  const items = [];
+  for (const row of rows) {
+    if (row.owner !== userId || !row.ciphertext) continue;
+    try {
+      items.push({ id: row.id, ...(await decryptJSON(row.iv, row.ciphertext)) });
+    } catch (e) {
+      console.warn('Skipping undecryptable dictionary entry', row.id, e);
+    }
+  }
+  return items;
+}
+
+export async function saveDictionaryEntry(entry) {
+  const { userId } = getSession();
+  const db = await openDb();
+  const id = entry.id || crypto.randomUUID();
+  const { id: _id, owner: _o, iv: _iv, ciphertext: _ct, ...payload } = entry;
+  const { iv, ciphertext } = await encryptJSON({ ...payload, id });
+  await tx(db, 'dictionaries', 'readwrite', (store) => store.put({ id, owner: userId, iv, ciphertext }));
+  return { id, ...payload };
+}
+
+export async function deleteDictionaryEntry(id) {
+  const { userId } = getSession();
+  const db = await openDb();
+  const row = await tx(db, 'dictionaries', 'readonly', (store) => store.get(id));
+  if (!row) return;
+  if (row.owner !== userId) throw new Error('Entry belongs to another user');
+  await tx(db, 'dictionaries', 'readwrite', (store) => store.delete(id));
 }

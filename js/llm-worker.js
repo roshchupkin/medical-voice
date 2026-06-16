@@ -6,7 +6,7 @@
 //   - 'extract': fill a structured medical form from the clinician-reviewed
 //                transcript, with per-field source traceability.
 //
-// Messages in:  { type: 'correct', id, segments, language, protectedTerms, knownTerms }
+// Messages in:  { type: 'correct', id, window?, segments?, protectedTerms, knownTerms }
 //               { type: 'extract', id, transcript, segments, schema }
 // Messages out: { type: 'progress', text, progress }   // progress is 0..1
 //               { type: 'ready', modelId }
@@ -15,15 +15,13 @@
 
 import * as webllm from 'https://esm.run/@mlc-ai/web-llm@0.2.84';
 import { requestWebGpuAdapter, WEBGPU_ADAPTER_ERROR } from './webgpu-probe.js';
+import { EXTRACT_MAX_TRANSCRIPT_CHARS } from './config.js';
 
 const MODEL_ID = 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC';
 // A smaller context window keeps GPU memory use down on weaker adapters (some
 // Windows GPUs cap maxStorageBufferBindingSize at 256 MB, which causes device
 // loss with larger windows). 4096 tokens is plenty for our prompts + JSON.
 const CONTEXT_WINDOW = 4096;
-// Keep the prompt safely inside the context window (~4 chars per token, leaving
-// room for the system prompt and the generated JSON).
-const MAX_TRANSCRIPT_CHARS = 8000;
 
 let engine = null;
 let enginePromise = null;
@@ -129,22 +127,39 @@ const CORE_RULE =
   'maar je mag de medische betekenis niet veranderen. Bij twijfel markeer je de ' +
   'passage als onzeker in plaats van zelf een keuze te maken.';
 
-function buildCorrectionMessages({ segments, protectedTerms, knownTerms }) {
+function formatSegmentBlock(segments) {
+  return (segments || []).map((s) => `${s.id}: ${s.text}`).join('\n') || '(geen)';
+}
+
+function buildCorrectionMessages({ window, segments, protectedTerms, knownTerms }) {
+  const target = window ? (window.target || []) : (segments || []);
+  const prevContext = window ? (window.prevContext || []) : [];
+  const nextContext = window ? (window.nextContext || []) : [];
+  const chunked = !!(window && (prevContext.length || nextContext.length || target.length < (segments || []).length));
+
   const system = [
     'Je bent een medisch assistent die ruwe Nederlandse spraak-naar-tekst transcripties nakijkt.',
-    'Corrigeer eventuele spelfouten, herkenningsfouten en grammaticale problemen in de transcriptie, gebaseerd op de medische context.',
+    'Corrigeer eventuele spelfouten, herkenningsfouten en grammaticale problemen, gebaseerd op de medische context.',
     CORE_RULE,
-    'Corrigeer alleen wanneer de correctie duidelijk is. Als een woord of zin onzeker is, markeer dit expliciet in plaats van stilzwijgend te corrigeren.',
-    'Let extra goed op medicatienamen, doseringen, getallen, datums, anatomische locaties, links/rechts, diagnoses, allergieën, negaties (geen, niet, zonder, wel, toegenomen, afgenomen) en behandeladviezen.',
-    'Verander NOOIT stilzwijgend een medicatienaam, dosering, links/rechts of een negatie. Bij twijfel: markeer als onzeker (highlight_color "yellow" of "red").',
+    'Corrigeer alleen wanneer de correctie duidelijk is. Bij onzekerheid: markeer expliciet (highlight_color yellow of red).',
+    'Let extra goed op medicatienamen, doseringen, getallen, datums, anatomische locaties, links/rechts, diagnoses, allergieën, negaties en behandeladviezen.',
+    'Verander NOOIT stilzwijgend een medicatienaam, dosering, links/rechts of een negatie.',
+  ];
+
+  if (chunked) {
+    system.push(
+      'Corrigeer en retourneer segmenten uitsluitend voor DOELSEGMENTEN.',
+      'Contextsegmenten (vorige/volgende) helpen bij zinsgrenzen; negeer ze in de output.',
+    );
+  }
+
+  system.push(
     '',
-    'Antwoord UITSLUITEND met een JSON-object met deze structuur:',
+    'Antwoord UITSLUITEND met een JSON-object:',
     '{',
-    '  "corrected_transcript": "<volledige gecorrigeerde tekst>",',
     '  "segments": [',
     '    {',
     '      "segment_id": "<id>",',
-    '      "original_text": "<originele tekst>",',
     '      "corrected_text": "<gecorrigeerde tekst>",',
     '      "change_type": "spelling|grammar|medical_term|medication|dosage|anatomy|laterality|negation|number|date|diagnosis|unclear_audio|no_change",',
     '      "confidence": "high|medium|low",',
@@ -156,8 +171,8 @@ function buildCorrectionMessages({ segments, protectedTerms, knownTerms }) {
     '  ],',
     '  "global_warnings": ["<korte waarschuwing>"]',
     '}',
-    'Geef voor ELK segment exact één object terug met hetzelfde segment_id. Verzin geen segmenten.',
-  ];
+    'Geef voor ELK doelsegment exact één object met hetzelfde segment_id. Verzin geen segmenten.',
+  );
 
   if (protectedTerms && protectedTerms.length) {
     system.push(
@@ -169,18 +184,30 @@ function buildCorrectionMessages({ segments, protectedTerms, knownTerms }) {
   if (knownTerms && knownTerms.length) {
     system.push(
       '',
-      'Bekende correcte spellingen die in de tekst kunnen voorkomen (gebruik als referentie):',
+      'Bekende correcte spellingen (referentie):',
       knownTerms.join(', '),
     );
   }
 
-  const numbered = (segments || [])
-    .map((s) => `${s.id}: ${s.text}`)
-    .join('\n');
+  let userContent;
+  if (chunked) {
+    userContent = [
+      'VORIGE CONTEXT (alleen lezen, niet corrigeren):',
+      formatSegmentBlock(prevContext),
+      '',
+      'DOELSEGMENTEN (corrigeer en retourneer ALLEEN deze):',
+      formatSegmentBlock(target),
+      '',
+      'VOLGENDE CONTEXT (alleen lezen, niet corrigeren):',
+      formatSegmentBlock(nextContext),
+    ].join('\n');
+  } else {
+    userContent = 'Ruwe transcriptie per segment:\n\n' + formatSegmentBlock(target);
+  }
 
   return [
     { role: 'system', content: system.join('\n') },
-    { role: 'user', content: 'Ruwe transcriptie per segment:\n\n' + numbered },
+    { role: 'user', content: userContent },
   ];
 }
 
@@ -190,9 +217,7 @@ const CHANGE_TYPES = new Set([
 ]);
 
 // Normalises the model's correction output into a trustworthy shape, filling
-// safe defaults and guaranteeing one entry per input segment. Missing or
-// malformed entries fall back to "no change, flagged for review" so nothing is
-// silently dropped.
+// safe defaults and guaranteeing one entry per target segment.
 function normalizeCorrection(parsed, segments) {
   const bySeg = new Map();
   const list = parsed && Array.isArray(parsed.segments) ? parsed.segments : [];
@@ -223,9 +248,7 @@ function normalizeCorrection(parsed, segments) {
     };
   });
 
-  const correctedTranscript = typeof parsed?.corrected_transcript === 'string' && parsed.corrected_transcript.trim()
-    ? parsed.corrected_transcript.trim()
-    : outSegments.map((s) => s.corrected_text).join(' ').trim();
+  const correctedTranscript = outSegments.map((s) => s.corrected_text).join(' ').trim();
 
   const globalWarnings = Array.isArray(parsed?.global_warnings)
     ? parsed.global_warnings.filter((w) => typeof w === 'string' && w.trim())
@@ -234,44 +257,58 @@ function normalizeCorrection(parsed, segments) {
   return { corrected_transcript: correctedTranscript, segments: outSegments, global_warnings: globalWarnings };
 }
 
-async function correct({ id, segments, protectedTerms, knownTerms }) {
-  const segs = Array.isArray(segments) ? segments : [];
-  if (!segs.length) {
-    self.postMessage({ type: 'complete', id, task: 'correct', result: { corrected_transcript: '', segments: [], global_warnings: [] } });
+function correctionMaxTokens(targetCount) {
+  return Math.min(2000, 120 + 80 * Math.max(1, targetCount || 1));
+}
+
+function failedCorrectionFallback(segs) {
+  return {
+    corrected_transcript: segs.map((s) => s.text).join(' ').trim(),
+    segments: segs.map((s) => ({
+      segment_id: s.id,
+      original_text: s.text,
+      corrected_text: s.text,
+      change_type: 'no_change',
+      confidence: 'low',
+      clinical_risk: 'medium',
+      highlight_color: 'yellow',
+      needs_clinician_review: true,
+      reason: 'Automatische correctie mislukt; handmatige controle vereist.',
+    })),
+    global_warnings: ['Automatische correctie kon niet worden uitgevoerd. Controleer de transcriptie handmatig.'],
+    failed: true,
+  };
+}
+
+async function correct({ id, window, segments, protectedTerms, knownTerms }) {
+  const target = window ? (window.target || []) : (Array.isArray(segments) ? segments : []);
+  if (!target.length) {
+    self.postMessage({
+      type: 'complete',
+      id,
+      task: 'correct',
+      result: { corrected_transcript: '', segments: [], global_warnings: [], failed: false },
+    });
     return;
   }
 
   let parsed = null;
   try {
     const response = await chatWithRetry({
-      messages: buildCorrectionMessages({ segments: segs, protectedTerms, knownTerms }),
+      messages: buildCorrectionMessages({ window, segments: target, protectedTerms, knownTerms }),
       temperature: 0,
-      max_tokens: 4000,
+      max_tokens: correctionMaxTokens(target.length),
     });
     const content = response?.choices?.[0]?.message?.content || '';
     parsed = parseJsonLoose(content);
   } catch (err) {
-    if (isFatalGpuError(err)) throw err; // device still lost after one retry
-    parsed = null; // recoverable: fall through to safe "no change, flag for review"
+    if (isFatalGpuError(err)) throw err;
+    parsed = null;
   }
 
   const result = parsed
-    ? normalizeCorrection(parsed, segs)
-    : {
-        corrected_transcript: segs.map((s) => s.text).join(' ').trim(),
-        segments: segs.map((s) => ({
-          segment_id: s.id,
-          original_text: s.text,
-          corrected_text: s.text,
-          change_type: 'no_change',
-          confidence: 'low',
-          clinical_risk: 'medium',
-          highlight_color: 'yellow',
-          needs_clinician_review: true,
-          reason: 'Automatische correctie mislukt; handmatige controle vereist.',
-        })),
-        global_warnings: ['Automatische correctie kon niet worden uitgevoerd. Controleer de transcriptie handmatig.'],
-      };
+    ? { ...normalizeCorrection(parsed, target), failed: false }
+    : failedCorrectionFallback(target);
 
   self.postMessage({ type: 'complete', id, task: 'correct', result });
 }
@@ -282,35 +319,22 @@ function buildMessages(numberedTranscript, fieldNames, fieldHints) {
     .join('\n');
   const system = [
     'Je bent een medisch assistent.',
-    'Vul het onderstaande medische formulier in op basis van de door de clinicus gecontroleerde transcriptie.',
-    'Gebruik ALLEEN informatie die expliciet in de transcriptie staat. Raad niets.',
-    'Als informatie ontbreekt, gebruik dan exact de waarde "niet vermeld".',
-    'Als informatie onzeker is of niet letterlijk genoemd wordt, markeer het veld als onzeker (needs_review = true) en leg uit in "warning".',
-    'Geef voor elk ingevuld veld de letterlijke bronzin uit de transcriptie ("source_sentence") en het bijbehorende segment-id ("source_segment_id").',
-    'De transcriptie is genummerd per segment ("s1: ...", "s2: ..."). Gebruik die id\'s.',
-    'Verander nooit een medicatienaam, dosering, links/rechts of negatie ten opzichte van de transcriptie.',
+    'Vul het medische formulier in op basis van de gecontroleerde transcriptie.',
+    'Gebruik ALLEEN expliciete informatie. Raad niets.',
+    'Ontbreekt iets → exact "niet vermeld".',
+    'Twijfel → needs_review true + korte warning.',
+    'Geef source_segment_id (bijv. s3) voor elk veld met een bron.',
+    'Wijzig nooit medicatienaam, dosering, links/rechts of negatie.',
     '',
-    'In te vullen velden:',
+    'Velden:',
     fieldList,
     '',
-    'Antwoord UITSLUITEND met een JSON-object met deze structuur:',
-    '{',
-    '  "fields": [',
-    '    {',
-    '      "field_name": "<veldnaam>",',
-    '      "value": "<waarde of \'niet vermeld\'>",',
-    '      "source_sentence": "<letterlijke bronzin of \'\'>",',
-    '      "source_segment_id": "<bijv. s3 of \'\'>",',
-    '      "confidence": "high|medium|low",',
-    '      "was_inferred": false,',
-    '      "needs_review": false,',
-    '      "warning": null',
-    '    }',
-    '  ],',
-    '  "missing_fields": [ { "field_name": "<veldnaam>", "reason": "<reden>" } ],',
-    '  "overall_warnings": [ "<korte waarschuwing>" ]',
-    '}',
-    'Geef voor ELK gevraagd veld exact één object in "fields". Verzin geen extra velden.',
+    'Antwoord UITSLUITEND met JSON:',
+    '{ "fields": [',
+    '  { "field_name": "<naam>", "value": "<waarde>", "source_segment_id": "<id of \'\'>",',
+    '    "confidence": "high|medium|low", "needs_review": false, "warning": null }',
+    '] }',
+    'Eén object per veld. Geen extra velden.',
   ].join('\n');
   return [
     { role: 'system', content: system },
@@ -318,9 +342,8 @@ function buildMessages(numberedTranscript, fieldNames, fieldHints) {
   ];
 }
 
-// Normalises the form-fill output: guarantees one entry per requested field,
-// fills "niet vermeld" for blanks, and coerces flags to safe defaults.
-function normalizeForm(parsed, fieldNames) {
+// Normalises form-fill output; derives source_sentence from segment lookup.
+function normalizeForm(parsed, fieldNames, segmentById) {
   const byName = new Map();
   const list = parsed && Array.isArray(parsed.fields) ? parsed.fields : [];
   for (const f of list) if (f && f.field_name) byName.set(String(f.field_name), f);
@@ -330,30 +353,30 @@ function normalizeForm(parsed, fieldNames) {
     let value = (f.value === null || f.value === undefined) ? '' : String(f.value);
     const empty = !value.trim() || /^niet vermeld$/i.test(value.trim());
     if (empty) value = 'niet vermeld';
+    const sid = typeof f.source_segment_id === 'string' ? f.source_segment_id : '';
+    const seg = sid && segmentById ? segmentById.get(sid) : null;
+    const source_sentence = seg ? String(seg.text || '') : '';
     return {
       field_name: name,
       value,
-      source_sentence: typeof f.source_sentence === 'string' ? f.source_sentence : '',
-      source_segment_id: typeof f.source_segment_id === 'string' ? f.source_segment_id : '',
+      source_sentence,
+      source_segment_id: sid,
       confidence: ['high', 'medium', 'low'].includes(f.confidence) ? f.confidence : (empty ? 'low' : 'medium'),
       was_inferred: f.was_inferred === true,
-      needs_review: f.needs_review === true || empty === false && f.confidence === 'low',
+      needs_review: f.needs_review === true || (empty === false && f.confidence === 'low'),
       warning: typeof f.warning === 'string' && f.warning.trim() ? f.warning : null,
     };
   });
-
-  const requested = new Set(fieldNames);
-  const missing_fields = Array.isArray(parsed?.missing_fields)
-    ? parsed.missing_fields
-        .filter((m) => m && m.field_name && requested.has(String(m.field_name)))
-        .map((m) => ({ field_name: String(m.field_name), reason: typeof m.reason === 'string' ? m.reason : 'Niet vermeld in transcriptie' }))
-    : [];
 
   const overall_warnings = Array.isArray(parsed?.overall_warnings)
     ? parsed.overall_warnings.filter((w) => typeof w === 'string' && w.trim())
     : [];
 
-  return { fields, missing_fields, overall_warnings };
+  return { fields, missing_fields: [], overall_warnings };
+}
+
+function extractMaxTokens(fieldCount) {
+  return Math.min(1200, 200 + 60 * Math.max(1, fieldCount || 1));
 }
 
 async function extract({ id, transcript, segments, schema }) {
@@ -364,31 +387,32 @@ async function extract({ id, transcript, segments, schema }) {
     if (def && def.description) fieldHints[name] = def.description;
   }
 
-  // Prefer a segment-numbered transcript so the model can cite source ids; fall
-  // back to plain text when segments are unavailable.
+  const segmentById = new Map();
   let numbered;
   if (Array.isArray(segments) && segments.length) {
+    for (const s of segments) segmentById.set(String(s.id), s);
     numbered = segments.map((s) => `${s.id}: ${s.text}`).join('\n');
   } else {
     numbered = (transcript || '').trim();
   }
+
   let truncated = false;
-  if (numbered.length > MAX_TRANSCRIPT_CHARS) {
-    numbered = numbered.slice(0, MAX_TRANSCRIPT_CHARS);
+  if (numbered.length > EXTRACT_MAX_TRANSCRIPT_CHARS) {
+    numbered = numbered.slice(0, EXTRACT_MAX_TRANSCRIPT_CHARS);
     truncated = true;
   }
 
   const response = await chatWithRetry({
     messages: buildMessages(numbered, fieldNames, fieldHints),
     temperature: 0,
-    max_tokens: 3000,
+    max_tokens: extractMaxTokens(fieldNames.length),
   });
   const content = response?.choices?.[0]?.message?.content || '';
   const parsed = parseJsonLoose(content);
   if (!parsed) {
     throw new Error('The model returned invalid JSON. Please try again.');
   }
-  const data = normalizeForm(parsed, fieldNames);
+  const data = normalizeForm(parsed, fieldNames, segmentById);
   self.postMessage({ type: 'complete', id, task: 'extract', data, truncated });
 }
 

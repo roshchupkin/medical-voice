@@ -46,14 +46,14 @@ Whisper produces the raw transcript with segment-level timestamps. The raw trans
 Clicking **"Improve & review"** runs, all locally:
 
 1. **Local correction rules** (`replace` / `expand` / `protect`) defined by the clinician are applied first; `protect` terms are passed to the LLM as "do not change".
-2. The **correction LLM** (`Qwen2.5-1.5B-Instruct`, 4-bit, ~900 MB, shared with the form-filler — one model load) improves the transcript using the Dutch medical core rule and returns structured JSON per segment (change type, confidence, clinical risk, reason, global warnings). Robust JSON parsing falls back to "no change, flag for review".
+2. The **correction LLM** (`Qwen2.5-1.5B-Instruct`, 4-bit, ~900 MB, shared with the form-filler — one model load) improves the transcript using the Dutch medical core rule and returns structured JSON per segment (change type, confidence, clinical risk, reason, global warnings). **Long consults** (roughly 500+ words) are split into target windows (~600–900 words each) with read-only overlap from neighboring segments; the model corrects only the target window per pass, results are merged by segment id, and boundary conflicts are flagged for review. Short consults use a single pass. Robust JSON parsing falls back to "no change, flag for review".
 3. **Uncertainty scoring** merges ASR confidence + LLM semantic uncertainty + a clinical-importance lexicon into **green / yellow / red** per segment, with hard safety overrides (e.g. any unclear negation, laterality, dosage, or number is red).
 
 The review UI shows a green/yellow/red highlighted transcript with a summary banner, a raw↔corrected toggle, and a per-segment panel to compare raw vs corrected, edit, accept/reject/confirm, and add notes. **Form generation is gated until every red passage is reviewed.** A "Correctieregel toevoegen" box lets the clinician add local correction rules on the fly.
 
 ### Step 3 — Medical form with source traceability
 
-Once the review is complete, **"Genereer formulier"** builds the final reviewed transcript (plus an edit log distinguishing rule/LLM/clinician changes) and feeds **only that** to the form-filling LLM. Output is structured JSON: each field carries its `source_sentence`, `source_segment_id`, confidence, `was_inferred`, `needs_review`, and an optional warning, plus `missing_fields` and `overall_warnings`. Missing information becomes `"niet vermeld"` rather than being invented.
+Once the review is complete, **"Genereer formulier"** builds the final reviewed transcript (plus an edit log distinguishing rule/LLM/clinician changes) and feeds **only that** to the form-filling LLM. Output is structured JSON: each field carries its `source_segment_id` (the app derives `source_sentence` from the reviewed segments), confidence, `needs_review`, and an optional warning. Missing information becomes `"niet vermeld"` rather than being invented. Very long reviewed transcripts are pre-filtered to the most relevant segments before extraction.
 
 Each field is editable and has a **"Toon bron"** (show source) panel revealing the full chain: raw Whisper sentence → LLM correction → final reviewed text, whether it was edited, its prior green/yellow/red flag, and whether the value was stated or inferred. The clinician **approves** the form (records a timestamp) and can export the full provenance as `.json`. Requires WebGPU — without it the review/form steps are disabled and transcription still works.
 
@@ -77,7 +77,8 @@ The app auto-locks after 5 minutes of inactivity (configurable in `js/config.js`
 - `index.html` – UI: login overlay, transcribe panel, saved transcripts, Step 2 review panel, Step 3 form panel
 - `js/app.js` – recording, upload, audio decoding (16 kHz mono), worker messaging, the staged pipeline orchestration, template/form UI wiring, IndexedDB wiring, login/lock UI flow
 - `js/worker.js` – Web Worker running the Whisper pipeline with segment timestamps (Transformers.js 3.8.1 from jsdelivr CDN)
-- `js/llm-worker.js` – Web Worker running the shared local LLM (Web-LLM 0.2.84 from esm.run CDN) with two tasks: `correct` (transcript correction) and `extract` (traceable form-fill)
+- `js/llm-worker.js` – Web Worker running the shared local LLM (Web-LLM 0.2.84 from esm.run CDN) with two tasks: `correct` (window-aware transcript correction) and `extract` (traceable form-fill)
+- `js/correction-chunks.js` – correction window builder (target + overlap context), merge, boundary conflict detection, extract segment pre-filtering
 - `js/segments.js` – sentence segmentation + heuristic ASR-confidence scoring from Whisper timing
 - `js/clinical-lexicon.js` – seed Dutch clinical lexicon + clinical-importance scoring and medical-term detection
 - `js/correction-memory.js` – local correction memory (rules: replace/expand/protect; session + persistent scopes)

@@ -31,3 +31,14 @@ export const DEFAULT_MODEL = 'onnx-community/whisper-large-v3-turbo';
 
 // Default transcription language ('nl' = Dutch). Set to 'en' for English.
 export const DEFAULT_LANGUAGE = 'nl';
+
+// Chunked LLM correction for long consults (see js/correction-chunks.js).
+export const CORRECTION_SINGLE_PASS_MAX_WORDS = 500;
+export const CORRECTION_TARGET_WORDS_MIN = 600;
+export const CORRECTION_TARGET_WORDS_MAX = 900;
+export const CORRECTION_TARGET_DURATION_SEC = 180;
+export const CORRECTION_OVERLAP_SENTENCES = 3;
+export const CORRECTION_OVERLAP_WORDS_MAX = 120;
+
+// Form extraction: max numbered transcript length sent to the local LLM.
+export const EXTRACT_MAX_TRANSCRIPT_CHARS = 8000;

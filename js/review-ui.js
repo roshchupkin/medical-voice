@@ -133,11 +133,28 @@ export function createReviewUI(root, callbacks = {}) {
   function renderWarnings() {
     if (!pipeline) return;
     const list = (pipeline.correction && pipeline.correction.globalWarnings) || [];
-    if (!list.length) { warnings.innerHTML = ''; return; }
-    warnings.innerHTML = '<strong>Waarschuwingen:</strong>';
-    const ul = el('ul');
-    for (const w of list) ul.append(el('li', '', w));
-    warnings.append(ul);
+    const conflicts = (pipeline.correction && pipeline.correction.boundaryConflicts) || [];
+    if (!list.length && !conflicts.length) { warnings.innerHTML = ''; return; }
+    warnings.innerHTML = '';
+    if (list.length) {
+      const head = el('strong', '', 'Waarschuwingen:');
+      warnings.append(head);
+      const ul = el('ul');
+      for (const w of list) ul.append(el('li', '', w));
+      warnings.append(ul);
+    }
+    if (conflicts.length) {
+      const head = el('strong', '', 'Grenzen tussen correctiedelen:');
+      warnings.append(head);
+      const ul = el('ul');
+      for (const c of conflicts) {
+        const ids = Array.isArray(c.segmentIds) && c.segmentIds.length
+          ? ` (${c.segmentIds.join(', ')})`
+          : '';
+        ul.append(el('li', c.severity === 'high' ? 'conflict-high' : '', (c.message || c.type) + ids));
+      }
+      warnings.append(ul);
+    }
   }
 
   function renderTranscript() {

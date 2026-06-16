@@ -39,6 +39,10 @@ The shared local model (`Qwen2.5-1.5B-Instruct`, ~900 MB) is fetched from `huggi
 
 The LLM needs roughly 2 GB of GPU memory. Close other GPU-heavy tabs and applications and try again. On machines with very little GPU memory the model may not fit at all.
 
+## Long consults take longer to correct
+
+Transcripts above roughly 500 words are corrected in **sequential parts** (~600–900 words per part, with read-only overlap for context). Each part is a separate local LLM call on the same GPU, so a 20-minute consult may show progress like "Correctie deel 2/5…". This keeps each pass within the model's context window and reduces per-pass GPU load. If the review banner lists **grenzen tussen correctiedelen**, check those segment pairs at window boundaries.
+
 ## "Genereer formulier" won't proceed
 
 Form generation is intentionally **gated**: every red (high-risk) passage in the transcript review must be reviewed first (confirm, edit, or reject it in the per-segment panel). The banner shows how many red passages remain. This prevents filling a form from a transcript with unresolved high-risk uncertainty.
@@ -49,4 +53,4 @@ The correction model is a small 1.5B local model: the value is the **safety scaf
 
 ## Form fields come back empty or wrong
 
-The model only extracts what is literally in the **reviewed** transcript (temperature 0); missing information becomes `"niet vermeld"` rather than being invented. Use each field's "Toon bron" panel to trace where a value came from, improve the per-field hints in the template, or edit the field manually. Very long transcripts are truncated to roughly the first 16,000 characters for extraction.
+The model only extracts what is literally in the **reviewed** transcript (temperature 0); missing information becomes `"niet vermeld"` rather than being invented. Use each field's "Toon bron" panel to trace where a value came from, improve the per-field hints in the template, or edit the field manually. Very long reviewed transcripts are **pre-filtered** to the most relevant segments (clinical keywords + field hints) before extraction, capped at roughly 8,000 characters; you will see a note if filtering was applied.

@@ -3,6 +3,12 @@ import * as auth from './auth.js';
 import { DEFAULT_MODEL, DEFAULT_LANGUAGE } from './config.js';
 import { splitIntoSegments } from './segments.js';
 import { decodeToMono16k } from './audio-decode.js';
+import {
+  buildCorrectionWindows,
+  mergeCorrectionResults,
+  detectBoundaryConflicts,
+  filterSegmentsForExtract,
+} from './correction-chunks.js';
 import * as recordingSession from './recording-session.js';
 import * as transcribeSegments from './transcribe-segments.js';
 import * as correctionMemory from './correction-memory.js';
@@ -1273,12 +1279,16 @@ function llmRequest(payload) {
   });
 }
 
-function correctInWorker(segments, protectedTerms, knownTerms) {
-  return llmRequest({ type: 'correct', segments, protectedTerms, knownTerms }).then((m) => m.result);
+function correctInWorker(window, protectedTerms, knownTerms) {
+  return llmRequest({ type: 'correct', window, protectedTerms, knownTerms }).then((m) => m.result);
 }
 
 function extractInWorker(transcript, segments, schema) {
-  return llmRequest({ type: 'extract', transcript, segments, schema }).then((m) => ({ data: m.data, truncated: m.truncated }));
+  const { segments: filtered, filtered: wasFiltered } = filterSegmentsForExtract(segments, schema);
+  return llmRequest({ type: 'extract', transcript, segments: filtered, schema }).then((m) => ({
+    data: m.data,
+    truncated: m.truncated || wasFiltered,
+  }));
 }
 
 // =====================================================================
@@ -1438,13 +1448,43 @@ async function runCorrection() {
     const protectedTerms = dedupeProtected(protectedAll);
     const knownTerms = findKnownTerms(inputSegments.map((s) => s.text).join(' '));
 
-    const result = await correctInWorker(inputSegments, protectedTerms, knownTerms);
+    const windows = buildCorrectionWindows(inputSegments);
+    const windowResults = [];
+    for (let i = 0; i < windows.length; i++) {
+      const label = windows.length > 1
+        ? `Correctie deel ${i + 1}/${windows.length}…`
+        : 'Transcriptie verbeteren…';
+      setLlmProgress(label, windows.length > 1 ? i / windows.length : undefined);
+      const wr = await correctInWorker(windows[i], protectedTerms, knownTerms);
+      if (!auth.isUnlocked()) return;
+      windowResults.push(wr);
+      if (windows.length > 1) {
+        setLlmProgress(`Correctie deel ${i + 1}/${windows.length} voltooid.`, (i + 1) / windows.length);
+      }
+    }
+
+    const merged = mergeCorrectionResults(windows, windowResults, inputSegments);
+    const extraConflicts = detectBoundaryConflicts(merged.segments, windows);
+    const boundaryConflicts = [
+      ...(merged.boundaryConflicts || []),
+      ...extraConflicts,
+    ];
+    const result = {
+      corrected_transcript: merged.corrected_transcript,
+      segments: merged.segments,
+      global_warnings: merged.global_warnings,
+    };
     if (!auth.isUnlocked()) return;
 
     pipeline.correction = {
       correctedText: result.corrected_transcript,
       segments: result.segments,
       globalWarnings: result.global_warnings,
+      boundaryConflicts,
+      correctionMeta: {
+        windowCount: windows.length,
+        chunked: windows.length > 1,
+      },
     };
     pipeline.annotations = annotateTranscriptUncertainty(inputSegments, result.segments);
     pipeline.edits = {};

@@ -80,7 +80,7 @@ export async function deriveCredentials(username, password) {
 let session = null; // { userId, username, key }
 let lastActivity = Date.now();
 let lockCheckTimer = null;
-let handlers = { onLock: null, isBusy: null };
+let handlers = { onLock: null, onPrepareLock: null, isBusy: null };
 let activityListenersAttached = false;
 
 export function isUnlocked() {
@@ -102,6 +102,18 @@ export async function login(username, password) {
 
 export function lock() {
   if (!session) return;
+  void lockInternal();
+}
+
+async function lockInternal() {
+  if (!session) return;
+  try {
+    const prep = handlers.onPrepareLock?.();
+    if (prep && typeof prep.then === 'function') await prep;
+  } catch (e) {
+    console.warn('Pre-lock preparation failed', e);
+  }
+  if (!session) return;
   session = null;
   stopAutoLock();
   if (handlers.onLock) handlers.onLock();
@@ -109,8 +121,8 @@ export function lock() {
 
 // --- Inactivity auto-lock ---
 
-export function configureAutoLock({ onLock, isBusy }) {
-  handlers = { onLock: onLock || null, isBusy: isBusy || null };
+export function configureAutoLock({ onLock, onPrepareLock, isBusy }) {
+  handlers = { onLock: onLock || null, onPrepareLock: onPrepareLock || null, isBusy: isBusy || null };
   if (!activityListenersAttached) {
     const markActivity = () => { lastActivity = Date.now(); };
     for (const ev of ACTIVITY_EVENTS) {
@@ -126,7 +138,6 @@ function startAutoLock() {
   lockCheckTimer = setInterval(() => {
     const idleMs = Date.now() - lastActivity;
     if (idleMs < AUTO_LOCK_MINUTES * 60 * 1000) return;
-    // Recording or transcribing counts as "in use" even without input events.
     if (handlers.isBusy && handlers.isBusy()) {
       lastActivity = Date.now();
       return;

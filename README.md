@@ -35,7 +35,7 @@ Then open http://localhost:8000. The microphone only works on `localhost` or HTT
 - **Models**: Whisper large-v3-turbo (default), Whisper medium (lighter), or Whisper large-v3 (best accuracy) — selectable in the UI and configurable in `js/config.js`. Downloaded from Hugging Face on first transcription (4-bit weights), then cached by the browser — subsequent use works fully offline.
 - **Engine**: WebGPU when the browser/GPU supports it (Chrome/Edge), otherwise WebAssembly on the CPU (slower).
 - **Languages**: Dutch (default) or English from the dropdown.
-- **Storage**: transcripts and their audio live in IndexedDB on this device only, encrypted per user. Unsaved recordings are kept in memory and lost on refresh.
+- **Storage**: transcripts and their audio live in IndexedDB on this device only, encrypted per user. **Recordings are persisted incrementally** (every 5 s) while you record; **transcription drafts autosave** per segment for live recordings. After unlock or a crash, use the recovery banner to restore audio or resume transcription. Click **Save transcript** to finalize a draft.
 
 ### Step 1 — Whisper transcription
 

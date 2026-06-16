@@ -165,6 +165,21 @@
     }
     .badge.webgpu { background: #d1f7e0; border-color: #28a745; color: #14692d; }
     .badge.wasm { background: #fff3cd; border-color: #ffc107; color: #7a5c00; }
+    .badge.draft { background: #e8f4fd; border-color: var(--primary); color: var(--primary); font-size: 0.75rem; margin-left: 0.35rem; vertical-align: middle; }
+    .recovery-banner {
+      background: #fff8e6;
+      border: 1px solid #ffc107;
+      border-radius: var(--radius-sm);
+      padding: 0.85rem 1rem;
+      margin-bottom: 1rem;
+      display: none;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+    }
+    .recovery-banner.visible { display: flex; }
+    .recovery-banner p { margin: 0; flex: 1; min-width: 200px; font-size: 0.9rem; }
+    .recovery-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
     .model-status { color: var(--text-muted); flex: 1; min-width: 200px; }
     .progress-wrap {
       flex-basis: 100%;
@@ -479,6 +494,14 @@
       <div class="progress-wrap" id="progressWrap"><div class="progress-bar" id="progressBar"></div></div>
     </div>
 
+    <div class="recovery-banner" id="recoveryBanner" role="alert">
+      <p id="recoveryMessage"></p>
+      <div class="recovery-actions">
+        <button type="button" id="recoveryRecoverBtn" class="primary">Recover</button>
+        <button type="button" id="recoveryDiscardBtn" class="danger">Discard</button>
+      </div>
+    </div>
+
     <div class="main-grid">
       <!-- Section A: Transcribe -->
       <div class="panel">
@@ -498,7 +521,7 @@
             <button type="button" id="pauseRecordBtn" class="record" style="display:none;">Pause</button>
           </div>
         </div>
-        <p class="hint">Record up to 3 hours, or upload audio files. Formats: WAV, MP3, M4A, WebM, OGG, etc. Unsaved recordings are kept in memory only.</p>
+        <p class="hint">Record up to 3 hours, or upload audio files. Formats: WAV, MP3, M4A, WebM, OGG, etc. Recordings are saved incrementally; drafts autosave during transcription.</p>
         <div class="row model-row">
           <span class="model-label">Model:</span>
           <select id="modelSelect">
@@ -516,6 +539,7 @@
           <strong style="display:block; margin-top:1rem;">Audio</strong>
           <audio id="recordedAudio" controls style="display:block; width:100%; margin-top:0.35rem;"></audio>
           <button type="button" id="transcribeBtn" class="primary" style="margin-top:0.5rem;">Transcribe</button>
+          <div class="progress-wrap" id="transcribeProgressWrap" style="margin-top:0.5rem;"><div class="progress-bar" id="transcribeProgressBar"></div></div>
         </div>
         <strong style="display:block; margin-top:1rem;">Transcript</strong>
         <div id="result">Record or upload audio to transcribe.</div>
@@ -542,6 +566,7 @@
             <audio id="detailAudio" controls style="display:block; width:100%; margin-top:0.35rem;"></audio>
             <div class="row model-row detail-retranscribe-row">
               <button type="button" id="detailRetranscribeBtn" class="primary">Re-transcribe</button>
+              <button type="button" id="detailResumeTranscribeBtn" class="primary" style="display:none;">Resume transcription</button>
               <span class="hint" style="margin-top:0;">Uses the model and language selected on the left.</span>
             </div>
             <a id="detailDownloadAudioLink" class="button-as-link" href="#" download="recording.webm" style="display:inline-block; margin-top:0.5rem;">Download audio</a>

@@ -2,6 +2,9 @@ import * as db from './db.js';
 import * as auth from './auth.js';
 import { DEFAULT_MODEL, DEFAULT_LANGUAGE } from './config.js';
 import { splitIntoSegments } from './segments.js';
+import { decodeToMono16k } from './audio-decode.js';
+import * as recordingSession from './recording-session.js';
+import * as transcribeSegments from './transcribe-segments.js';
 import * as correctionMemory from './correction-memory.js';
 import { findKnownTerms } from './clinical-lexicon.js';
 import { annotateTranscriptUncertainty } from './uncertainty.js';
@@ -66,18 +69,38 @@ const reviewRoot = document.getElementById('reviewRoot');
 const formPanel = document.getElementById('formPanel');
 const formPanelStatus = document.getElementById('formPanelStatus');
 const formReviewRoot = document.getElementById('formReviewRoot');
+const recoveryBanner = document.getElementById('recoveryBanner');
+const recoveryMessage = document.getElementById('recoveryMessage');
+const recoveryRecoverBtn = document.getElementById('recoveryRecoverBtn');
+const recoveryDiscardBtn = document.getElementById('recoveryDiscardBtn');
+const transcribeProgressWrap = document.getElementById('transcribeProgressWrap');
+const transcribeProgressBar = document.getElementById('transcribeProgressBar');
+const detailResumeTranscribeBtn = document.getElementById('detailResumeTranscribeBtn');
 
 // --- State ---
 let currentTranscriptText = '';
 let currentAudioBlob = null;        // unsaved recording/upload kept in memory
 let currentAudioObjectUrl = null;
 let currentChunks = [];             // Whisper segment timestamps for the current transcript
+let currentRecordingSessionId = null;
+let currentDraftId = null;
+let pendingRecovery = null;
 let currentDetailTranscript = null;
 let detailAudioObjectUrl = null;
 let isTranscribing = false;
 let isExtracting = false;           // true during correction OR form filling
 let llmSupported = false;           // set by probeWebGpu() — needs a working adapter, not just navigator.gpu
 let llmUnavailableReason = '';
+
+const UPLOAD_WARN_BYTES = 15 * 1024 * 1024; // ~1 h of Opus WebM at typical bitrates
+
+function debounce(fn, ms) {
+  let timer = null;
+  return (...args) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn(...args); }, ms);
+  };
+}
 
 // The staged pipeline currently under review/editing. One shared object drives
 // both the review panel and the form panel. See buildPipeline().
@@ -190,27 +213,7 @@ function transcribeInWorker(audioData, language, onPartial) {
   });
 }
 
-// --- Audio decoding (any format -> 16 kHz mono Float32Array) ---
-async function decodeToMono16k(blob) {
-  const arrayBuffer = await blob.arrayBuffer();
-  const ctx = new AudioContext({ sampleRate: 16000 });
-  try {
-    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-    if (audioBuffer.numberOfChannels === 1) {
-      return audioBuffer.getChannelData(0).slice();
-    }
-    const out = new Float32Array(audioBuffer.length);
-    for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
-      const ch = audioBuffer.getChannelData(c);
-      for (let i = 0; i < audioBuffer.length; i++) out[i] += ch[i];
-    }
-    const n = audioBuffer.numberOfChannels;
-    for (let i = 0; i < out.length; i++) out[i] /= n;
-    return out;
-  } finally {
-    ctx.close();
-  }
-}
+// --- Audio decoding imported from js/audio-decode.js ---
 
 // --- UI helpers ---
 function formatDuration(ms) {
@@ -278,17 +281,167 @@ function formatDate(iso) {
   } catch (_) { return iso || '—'; }
 }
 
-function setCurrentAudio(blob) {
+function setCurrentAudio(blob, options = {}) {
   currentAudioBlob = blob;
+  if (options && 'sessionId' in options) currentRecordingSessionId = options.sessionId;
   if (currentAudioObjectUrl) URL.revokeObjectURL(currentAudioObjectUrl);
   currentAudioObjectUrl = URL.createObjectURL(blob);
   recordedAudio.src = currentAudioObjectUrl;
   recordedSection.classList.remove('hidden');
 }
 
-// --- Transcription flow ---
-async function runTranscription(blob, onPartialTarget) {
+function updateBeforeUnload() {
+  const recording = mediaRecorder && (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused');
+  const hasDraftWork = !!(currentDraftId && (currentTranscriptText || isTranscribing));
+  if (recording || hasDraftWork || isTranscribing) {
+    window.onbeforeunload = () => true;
+  } else {
+    window.onbeforeunload = null;
+  }
+}
+
+function setTranscribeProgress(segment, totalSegments) {
+  if (!transcribeProgressWrap || !transcribeProgressBar) return;
+  if (!totalSegments || totalSegments <= 1) {
+    transcribeProgressWrap.classList.remove('visible');
+    transcribeProgressBar.style.width = '0%';
+    return;
+  }
+  transcribeProgressWrap.classList.add('visible');
+  transcribeProgressBar.style.width = Math.round((segment / totalSegments) * 100) + '%';
+}
+
+function hideRecoveryBanner() {
+  pendingRecovery = null;
+  recoveryBanner?.classList.remove('visible');
+}
+
+function showRecoveryBanner(recovery) {
+  pendingRecovery = recovery;
+  if (recoveryMessage) recoveryMessage.textContent = recovery.message || '';
+  if (recoveryRecoverBtn) {
+    if (recovery.type === 'draft') {
+      recoveryRecoverBtn.textContent = recovery.resume ? 'Resume' : 'Open draft';
+    } else {
+      recoveryRecoverBtn.textContent = 'Recover audio';
+    }
+  }
+  recoveryBanner?.classList.add('visible');
+}
+
+async function restoreDraftWorkspace(draftId) {
+  const draft = await db.getTranscript(draftId);
+  if (!draft) throw new Error('Draft not found');
+  currentDraftId = draft.id;
+  currentRecordingSessionId = draft.recordingSessionId || null;
+  currentChunks = draft.transcription?.chunks || [];
+  detailPanel.classList.add('hidden');
+  if (draft.text) {
+    setResult(draft.text);
+  } else {
+    setResult('Draft loaded. Click Transcribe to continue.');
+  }
+  if (draft.recordingSessionId) {
+    const { blob } = await recordingSession.assembleSessionBlob(draft.recordingSessionId);
+    setCurrentAudio(blob, { sessionId: draft.recordingSessionId });
+  } else if (draft.recordingId) {
+    const rec = await db.getRecording(draft.recordingId);
+    if (rec?.blob) setCurrentAudio(rec.blob, { sessionId: null });
+  }
+  hideRecoveryBanner();
+  showToast('Draft restored to the transcribe panel.');
+  return draft;
+}
+
+async function checkRecovery() {
+  hideRecoveryBanner();
+  try {
+    const activeSession = await recordingSession.getActiveSession();
+    if (activeSession && activeSession.chunkCount > 0) {
+      const mins = Math.round((activeSession.chunkCount * recordingSession.CHUNK_TIMESLICE_MS) / 60000);
+      showRecoveryBanner({
+        type: 'recording',
+        sessionId: activeSession.id,
+        message: `Interrupted recording found (~${mins || '<1'} min saved). Recover the audio or discard.`,
+      });
+      return;
+    }
+
+    const drafts = await db.listDraftTranscripts();
+    const incomplete = drafts.find((d) => transcribeSegments.isTranscriptionIncomplete(d));
+    if (incomplete) {
+      const t = incomplete.transcription || {};
+      const progress = t.monolithic
+        ? 'Transcription was interrupted.'
+        : `Transcription in progress (${t.completedSegments || 0}/${t.totalSegments || '?'} segments).`;
+      showRecoveryBanner({
+        type: 'draft',
+        draftId: incomplete.id,
+        resume: true,
+        message: progress + ' Open the draft to continue.',
+      });
+      return;
+    }
+
+    const withWork = drafts.find((d) => d.text || d.recordingSessionId || d.recordingId);
+    if (withWork) {
+      showRecoveryBanner({
+        type: 'draft',
+        draftId: withWork.id,
+        resume: false,
+        message: 'Unsaved draft with audio and/or transcript found. Open it to continue, or discard.',
+      });
+      return;
+    }
+
+    const orphans = await recordingSession.listRecoverableSessions();
+    if (orphans.length > 0) {
+      const s = orphans[0];
+      const mins = Math.round((s.chunkCount * recordingSession.CHUNK_TIMESLICE_MS) / 60000);
+      showRecoveryBanner({
+        type: 'recording',
+        sessionId: s.id,
+        message: `Recorded audio found (~${mins || '<1'} min, not yet transcribed). Recover it or discard.`,
+      });
+    }
+  } catch (e) {
+    console.warn('Recovery check failed', e);
+  }
+}
+
+async function recoverRecordingSession(sessionId) {
+  try {
+    const { blob } = await recordingSession.assembleSessionBlob(sessionId);
+    currentRecordingSessionId = sessionId;
+    currentDraftId = null;
+    setCurrentAudio(blob, { sessionId });
+    setResult('Recovered recording. Pick model and language, then click Transcribe.');
+    hideRecoveryBanner();
+    showToast('Recording recovered.');
+  } catch (e) {
+    showToast('Could not recover recording: ' + e.message);
+  }
+}
+
+const persistDraftPartial = debounce(async (patch) => {
+  if (!auth.isUnlocked() || !currentDraftId) return;
+  try {
+    await db.updateTranscript(currentDraftId, patch);
+  } catch (_) { /* best-effort */ }
+}, 30000);
+
+async function runMonolithicTranscription(blob, onPartialTarget) {
+  if (blob.size >= UPLOAD_WARN_BYTES) {
+    showToast('Large file: transcription loads the full audio into memory. Recording in-app is safer for long sessions.', 8000);
+  }
   const language = languageSelect.value || null;
+  if (currentDraftId) {
+    const existing = await db.getTranscript(currentDraftId);
+    const prev = existing?.transcription || {};
+    await db.updateTranscript(currentDraftId, {
+      transcription: { ...prev, complete: false, monolithic: true, started: true },
+    });
+  }
   let audioData;
   try {
     audioData = await decodeToMono16k(blob);
@@ -296,29 +449,98 @@ async function runTranscription(blob, onPartialTarget) {
     throw new Error('Could not decode this audio file. ' + (err.message || ''));
   }
   await ensureModelLoaded();
-  return transcribeInWorker(audioData, language, onPartialTarget);
+  const { text, chunks } = await transcribeInWorker(audioData, language, onPartialTarget);
+  if (currentDraftId) {
+    const raw = { text, segments: splitIntoSegments(text, chunks), modelId: modelSelect.value };
+    await db.updateTranscript(currentDraftId, {
+      text,
+      raw,
+      language: language || 'auto',
+      transcription: { complete: true, monolithic: true, chunks: chunks || [] },
+    });
+  }
+  return { text, chunks };
+}
+
+async function runSegmentedTranscription(onPartialTarget) {
+  if (!currentRecordingSessionId) throw new Error('No recording session');
+  const language = languageSelect.value || null;
+  const modelId = modelSelect.value;
+
+  if (!currentDraftId) {
+    const draft = await transcribeSegments.createDraftForSession(currentRecordingSessionId, { language, modelId });
+    currentDraftId = draft.id;
+    loadSavedList();
+  }
+
+  const updated = await transcribeSegments.transcribeRecordingSession(
+    currentRecordingSessionId,
+    currentDraftId,
+    {
+      language,
+      modelId,
+      ensureModelLoaded,
+      transcribeInWorker,
+      onProgress: ({ segment, totalSegments, message }) => {
+        setLoading(message);
+        setTranscribeProgress(segment, totalSegments);
+      },
+      onPartial: onPartialTarget,
+      persistPartial: (patch) => persistDraftPartial(patch),
+      isCancelled: () => !auth.isUnlocked(),
+    },
+  );
+
+  currentDraftId = updated.id;
+  return { text: updated.text, chunks: updated.transcription?.chunks || [] };
+}
+
+// --- Transcription flow ---
+async function runTranscription(blob, onPartialTarget) {
+  if (currentRecordingSessionId) {
+    return runSegmentedTranscription(onPartialTarget);
+  }
+  return runMonolithicTranscription(blob, onPartialTarget);
 }
 
 transcribeBtn.addEventListener('click', async () => {
-  if (!currentAudioBlob || isTranscribing) return;
+  if ((!currentAudioBlob && !currentRecordingSessionId) || isTranscribing) return;
   isTranscribing = true;
   transcribeBtn.disabled = true;
+  updateBeforeUnload();
   setLoading('Preparing audio…');
   try {
     const { text, chunks } = await runTranscription(currentAudioBlob, (partial) => {
       if (!auth.isUnlocked()) return;
       resultEl.textContent = partial;
       resultEl.className = 'loading';
+      if (currentDraftId) {
+        persistDraftPartial({ text: partial });
+      }
     });
     if (!auth.isUnlocked()) return;
     currentChunks = chunks || [];
     setResult(text);
+    updateBeforeUnload();
   } catch (err) {
     if (!auth.isUnlocked()) return;
+    if (currentDraftId) {
+      try {
+        const draft = await db.getTranscript(currentDraftId);
+        if (draft?.text) {
+          setResult(draft.text);
+          showToast('Transcription stopped: ' + err.message + ' Draft saved — you can resume.', 6000);
+          loadSavedList();
+          return;
+        }
+      } catch (_) { /* fall through */ }
+    }
     setResult('Transcription failed: ' + err.message, true);
   } finally {
     isTranscribing = false;
     transcribeBtn.disabled = false;
+    setTranscribeProgress(0, 0);
+    updateBeforeUnload();
   }
 });
 
@@ -327,6 +549,7 @@ const MAX_RECORDING_MS = 3 * 60 * 60 * 1000;
 let mediaRecorder = null;
 let recordingStream = null;
 let recordingChunks = [];
+let recordingChunkIndex = 0;
 let recordingMimeType = 'audio/webm';
 let recordingTimerInterval = null;
 let recordingLimitInterval = null;
@@ -362,6 +585,16 @@ recordBtn.addEventListener('click', async () => {
     return;
   }
   try {
+    const active = await recordingSession.getActiveSession();
+    if (active && active.chunkCount > 0) {
+      const discard = window.confirm(
+        'An unfinished recording exists. Click OK to discard it and start a new recording, or Cancel to keep it and use Recover on the banner.',
+      );
+      if (!discard) return;
+      await recordingSession.abandonSession(active.id);
+      hideRecoveryBanner();
+    }
+
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     recordingStream = stream;
     recordingMimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
@@ -369,33 +602,65 @@ recordBtn.addEventListener('click', async () => {
 
     recordedSection.classList.add('hidden');
     currentAudioBlob = null;
+    currentDraftId = null;
     recordingChunks = [];
+    recordingChunkIndex = 0;
+
+    const sessionId = await recordingSession.createSession(recordingMimeType);
+    currentRecordingSessionId = sessionId;
 
     mediaRecorder = recordingMimeType ? new MediaRecorder(stream, { mimeType: recordingMimeType }) : new MediaRecorder(stream);
 
     mediaRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size) recordingChunks.push(e.data);
+      if (!e.data || !e.data.size) return;
+      recordingChunks.push(e.data);
+      const idx = recordingChunkIndex++;
+      recordingSession.appendChunk(sessionId, idx, e.data).catch((err) => {
+        showToast('Could not save recording chunk: ' + err.message);
+      });
     };
 
-    mediaRecorder.onstop = () => {
+    mediaRecorder.onstop = async () => {
       recordingStream?.getTracks().forEach(t => t.stop());
       recordingStream = null;
       recordBtn.textContent = 'Record';
       recordBtn.classList.remove('stop');
-      window.onbeforeunload = null;
       if (recordingTimerInterval) { clearInterval(recordingTimerInterval); recordingTimerInterval = null; }
       if (recordingLimitInterval) { clearInterval(recordingLimitInterval); recordingLimitInterval = null; }
       recordingIndicator.classList.remove('visible');
       pauseRecordBtn.style.display = 'none';
+      updateBeforeUnload();
 
-      if (!recordingChunks.length) {
+      if (!recordingChunks.length && !recordingChunkIndex) {
+        if (currentRecordingSessionId) await recordingSession.abandonSession(currentRecordingSessionId);
+        currentRecordingSessionId = null;
         setResult('Recording produced no audio.', true);
         return;
       }
-      const blob = new Blob(recordingChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-      recordingChunks = [];
-      setCurrentAudio(blob);
-      setResult('Listen back, pick model and language, then click Transcribe.');
+
+      try {
+        if (currentRecordingSessionId) await recordingSession.completeSession(currentRecordingSessionId);
+        const { blob } = await recordingSession.assembleSessionBlob(currentRecordingSessionId);
+        recordingChunks = [];
+        setCurrentAudio(blob, { sessionId: currentRecordingSessionId });
+        if (!currentDraftId && currentRecordingSessionId) {
+          try {
+            const draft = await transcribeSegments.createDraftForSession(currentRecordingSessionId, {
+              language: languageSelect.value || 'auto',
+              modelId: modelSelect.value,
+            });
+            currentDraftId = draft.id;
+            loadSavedList();
+          } catch (_) { /* draft is optional; recovery banner still works */ }
+        }
+        setResult('Listen back, pick model and language, then click Transcribe.');
+      } catch (e) {
+        const blob = new Blob(recordingChunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
+        recordingChunks = [];
+        setCurrentAudio(blob, { sessionId: currentRecordingSessionId });
+        setResult('Listen back, pick model and language, then click Transcribe.');
+        showToast('Recording saved in memory; re-unlock if playback fails.');
+      }
     };
 
     mediaRecorder.onerror = (e) => {
@@ -403,10 +668,10 @@ recordBtn.addEventListener('click', async () => {
       if (mediaRecorder?.state === 'recording') mediaRecorder.stop();
     };
 
-    mediaRecorder.start(5000);
+    mediaRecorder.start(recordingSession.CHUNK_TIMESLICE_MS);
     recordBtn.textContent = 'Stop';
     recordBtn.classList.add('stop');
-    window.onbeforeunload = () => true;
+    updateBeforeUnload();
 
     recordingStartTime = Date.now();
     recordingPausedDuration = 0;
@@ -442,11 +707,28 @@ recordBtn.addEventListener('click', async () => {
 });
 
 // --- Upload ---
-fileInput.addEventListener('change', () => {
+fileInput.addEventListener('change', async () => {
   const file = fileInput.files && fileInput.files[0];
   if (!file) return;
-  setCurrentAudio(file);
-  setResult('Listen back, pick model and language, then click Transcribe.');
+  currentRecordingSessionId = null;
+  currentDraftId = null;
+  setCurrentAudio(file, { sessionId: null });
+  setResult('Saving upload…');
+  try {
+    const recordingId = crypto.randomUUID() + '.audio';
+    await db.saveRecording(recordingId, file, file.type);
+    const draft = await transcribeSegments.createAudioOnlyDraft(recordingId, {
+      language: languageSelect.value,
+      mimeType: file.type,
+    });
+    currentDraftId = draft.id;
+    loadSavedList();
+    setResult('Listen back, pick model and language, then click Transcribe.');
+    updateBeforeUnload();
+  } catch (e) {
+    setResult('Listen back, pick model and language, then click Transcribe.');
+    showToast('Could not persist upload: ' + e.message);
+  }
   fileInput.value = '';
 });
 
@@ -456,7 +738,7 @@ saveBtn.addEventListener('click', async () => {
   if (!text) return;
   const title = (window.prompt('Title for this transcript (optional):', '') || '').trim() || 'Untitled';
   try {
-    const id = crypto.randomUUID();
+    const id = currentDraftId || crypto.randomUUID();
     const raw = (pipeline && pipeline.id === null && pipeline.raw)
       ? pipeline.raw
       : { text, segments: splitIntoSegments(text, currentChunks), modelId: modelSelect.value };
@@ -466,14 +748,17 @@ saveBtn.addEventListener('click', async () => {
       text,
       language: languageSelect.value || 'auto',
       createdAt: new Date().toISOString(),
+      status: 'saved',
       raw,
     };
+    if (currentRecordingSessionId) {
+      entry.recordingSessionId = currentRecordingSessionId;
+    }
     if (currentAudioBlob) {
-      const recordingId = id + '.audio';
+      const recordingId = entry.recordingId || (id + '.audio');
       await db.saveRecording(recordingId, currentAudioBlob, currentAudioBlob.type);
       entry.recordingId = recordingId;
     }
-    // Persist the review/form pipeline when it belongs to this (unsaved) transcript.
     if (pipeline && pipeline.id === null) {
       entry.correction = pipeline.correction;
       entry.annotations = pipeline.annotations;
@@ -483,10 +768,18 @@ saveBtn.addEventListener('click', async () => {
       entry.editLog = pipeline.editLog;
       entry.form = pipeline.form;
     }
-    await db.saveTranscript(entry);
+    if (currentDraftId) {
+      const existing = await db.getTranscript(id);
+      entry.createdAt = existing?.createdAt || entry.createdAt;
+      await db.updateTranscript(id, entry);
+    } else {
+      await db.saveTranscript(entry);
+    }
     if (pipeline && pipeline.id === null) { pipeline.id = id; pipeline.title = title; }
+    currentDraftId = id;
     showToast('Saved as "' + title + '".');
     loadSavedList();
+    updateBeforeUnload();
   } catch (e) {
     showToast('Save failed: ' + e.message);
   }
@@ -502,16 +795,25 @@ function renderSavedList(items) {
     savedListEl.innerHTML = '<li class="empty-state">No saved transcripts yet. Transcribe and click Save.</li>';
     return;
   }
-  savedListEl.innerHTML = items.map(t => `
+  savedListEl.innerHTML = items.map(t => {
+    const isDraft = t.status === 'draft';
+    const tr = t.transcription || {};
+    let draftMeta = '';
+    if (isDraft && tr.totalSegments && !tr.monolithic) {
+      draftMeta = ` <span class="item-date">(${tr.completedSegments || 0}/${tr.totalSegments} segments)</span>`;
+    } else if (isDraft && tr.monolithic && !tr.complete) {
+      draftMeta = ' <span class="item-date">(transcribing…)</span>';
+    }
+    return `
     <li data-id="${t.id}">
-      <span class="item-title" title="${escapeHtml(t.title || 'Untitled')}">${escapeHtml(t.title || 'Untitled')}</span>
+      <span class="item-title" title="${escapeHtml(t.title || 'Untitled')}">${escapeHtml(t.title || 'Untitled')}${isDraft ? '<span class="badge draft">Draft</span>' : ''}${draftMeta}</span>
       <span class="item-date">${formatDate(t.createdAt)}</span>
       <span class="item-actions">
         <button type="button" class="open-btn">Open</button>
         <button type="button" class="danger delete-btn">Delete</button>
       </span>
-    </li>
-  `).join('');
+    </li>`;
+  }).join('');
   savedListEl.querySelectorAll('.open-btn').forEach(btn => {
     btn.addEventListener('click', () => openTranscript(btn.closest('li').dataset.id));
   });
@@ -541,6 +843,13 @@ async function openTranscript(id) {
   try {
     const t = await db.getTranscript(id);
     if (!t) throw new Error('Not found');
+    if (t.status === 'draft') {
+      await restoreDraftWorkspace(id);
+      if (transcribeSegments.isTranscriptionIncomplete(t)) {
+        showToast('Draft restored. Click Transcribe to resume, or Save when done.');
+      }
+      return;
+    }
     currentDetailTranscript = t;
     exitEditMode();
     detailTitle.textContent = t.title || 'Untitled';
@@ -556,6 +865,18 @@ async function openTranscript(id) {
         const ext = (rec.mimeType || '').includes('webm') ? '.webm' : '';
         detailDownloadAudioLink.download = (t.title || 'recording').replace(/\s+/g, '_') + (ext || '.audio');
       } else {
+        detailRecordingSection.classList.add('hidden');
+      }
+    } else if (t.recordingSessionId) {
+      try {
+        const { blob, mimeType } = await recordingSession.assembleSessionBlob(t.recordingSessionId);
+        detailAudioObjectUrl = URL.createObjectURL(blob);
+        detailRecordingSection.classList.remove('hidden');
+        detailAudio.src = detailAudioObjectUrl;
+        detailDownloadAudioLink.href = detailAudioObjectUrl;
+        const ext = (mimeType || '').includes('webm') ? '.webm' : '';
+        detailDownloadAudioLink.download = (t.title || 'recording').replace(/\s+/g, '_') + (ext || '.audio');
+      } catch (_) {
         detailRecordingSection.classList.add('hidden');
       }
     } else {
@@ -658,18 +979,19 @@ detailRetranscribeBtn.addEventListener('click', async () => {
   const originalText = currentDetailTranscript.text || '';
   detailContent.textContent = 'Re-transcribing…';
   try {
-    const { text, chunks } = await runTranscription(rec.blob, (partial) => {
+    const { text, chunks } = await runMonolithicTranscription(rec.blob, (partial) => {
       if (!auth.isUnlocked()) return;
       detailContent.textContent = partial;
     });
     if (!auth.isUnlocked()) return;
     const raw = { text, segments: splitIntoSegments(text, chunks), modelId: modelSelect.value };
-    // A fresh transcription invalidates any prior correction/review/form.
     const updated = await db.updateTranscript(currentDetailTranscript.id, {
       text, raw, correction: null, annotations: null, edits: null, finalTranscript: null, editLog: null, form: null,
+      transcription: { complete: true, monolithic: true, started: true, chunks: chunks || [] },
     });
     currentDetailTranscript = updated;
     detailContent.textContent = text;
+    detailResumeTranscribeBtn.style.display = 'none';
     showToast('Transcript updated. Re-run "Improve & review".');
   } catch (e) {
     if (!auth.isUnlocked()) return;
@@ -678,6 +1000,105 @@ detailRetranscribeBtn.addEventListener('click', async () => {
   } finally {
     isTranscribing = false;
     detailRetranscribeBtn.disabled = false;
+  }
+});
+
+async function resumeDraftTranscription(draftId) {
+  const draft = await db.getTranscript(draftId);
+  if (!draft || !transcribeSegments.isTranscriptionIncomplete(draft)) {
+    showToast('Nothing to resume.');
+    return;
+  }
+  currentDraftId = draft.id;
+  currentRecordingSessionId = draft.recordingSessionId || null;
+  currentChunks = draft.transcription?.chunks || [];
+  if (draft.raw?.segments) {
+    currentChunks = draft.transcription?.chunks || [];
+  }
+  setResult(draft.text || '');
+  hideRecoveryBanner();
+
+  try {
+    if (currentRecordingSessionId) {
+      const { blob } = await recordingSession.assembleSessionBlob(currentRecordingSessionId);
+      setCurrentAudio(blob, { sessionId: currentRecordingSessionId });
+    } else if (draft.recordingId) {
+      const rec = await db.getRecording(draft.recordingId);
+      if (rec?.blob) setCurrentAudio(rec.blob, { sessionId: null });
+    }
+  } catch (e) {
+    showToast('Could not load audio: ' + e.message);
+    return;
+  }
+
+  detailPanel.classList.add('hidden');
+  isTranscribing = true;
+  transcribeBtn.disabled = true;
+  updateBeforeUnload();
+  setLoading('Resuming transcription…');
+  try {
+    const { text, chunks } = await runTranscription(currentAudioBlob, (partial) => {
+      if (!auth.isUnlocked()) return;
+      resultEl.textContent = partial;
+      resultEl.className = 'loading';
+      persistDraftPartial({ text: partial });
+    });
+    if (!auth.isUnlocked()) return;
+    currentChunks = chunks || [];
+    setResult(text);
+    loadSavedList();
+  } catch (err) {
+    if (!auth.isUnlocked()) return;
+    if (draft.text) setResult(draft.text);
+    showToast('Resume failed: ' + err.message, 6000);
+  } finally {
+    isTranscribing = false;
+    transcribeBtn.disabled = false;
+    setTranscribeProgress(0, 0);
+    updateBeforeUnload();
+  }
+}
+
+detailResumeTranscribeBtn.addEventListener('click', () => {
+  if (!currentDetailTranscript) return;
+  resumeDraftTranscription(currentDetailTranscript.id);
+});
+
+recoveryRecoverBtn.addEventListener('click', async () => {
+  if (!pendingRecovery) return;
+  try {
+    if (pendingRecovery.type === 'recording') {
+      await recoverRecordingSession(pendingRecovery.sessionId);
+    } else if (pendingRecovery.draftId) {
+      const draft = await restoreDraftWorkspace(pendingRecovery.draftId);
+      if (pendingRecovery.resume && transcribeSegments.isTranscriptionIncomplete(draft)) {
+        await resumeDraftTranscription(draft.id);
+      }
+    }
+  } catch (e) {
+    showToast('Recovery failed: ' + e.message);
+  }
+});
+
+recoveryDiscardBtn.addEventListener('click', async () => {
+  if (!pendingRecovery) return;
+  try {
+    if (pendingRecovery.type === 'recording' && pendingRecovery.sessionId) {
+      await recordingSession.abandonSession(pendingRecovery.sessionId);
+      if (currentRecordingSessionId === pendingRecovery.sessionId) {
+        currentRecordingSessionId = null;
+      }
+      showToast('Discarded unfinished recording.');
+    } else if (pendingRecovery.draftId) {
+      await db.deleteTranscript(pendingRecovery.draftId);
+      if (currentDraftId === pendingRecovery.draftId) currentDraftId = null;
+      showToast('Discarded draft.');
+      loadSavedList();
+    }
+    hideRecoveryBanner();
+    await checkRecovery();
+  } catch (e) {
+    showToast('Discard failed: ' + e.message);
   }
 });
 
@@ -701,14 +1122,6 @@ const DEFAULT_TEMPLATE = [
 ];
 
 let templateFields = DEFAULT_TEMPLATE.map(f => ({ ...f }));
-
-function debounce(fn, ms) {
-  let timer = null;
-  return (...args) => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => { timer = null; fn(...args); }, ms);
-  };
-}
 
 // --- Template editor ---
 const persistTemplate = debounce(() => {
@@ -894,8 +1307,10 @@ const formReviewUI = createFormReviewUI(formReviewRoot, {
 });
 
 const persistPipeline = debounce(() => {
-  if (!auth.isUnlocked() || !pipeline || !pipeline.id) return;
-  db.updateTranscript(pipeline.id, {
+  if (!auth.isUnlocked() || !pipeline) return;
+  const id = pipeline.id || currentDraftId;
+  if (!id) return;
+  db.updateTranscript(id, {
     raw: pipeline.raw,
     correction: pipeline.correction,
     annotations: pipeline.annotations,
@@ -1217,36 +1632,54 @@ async function requestPersistentStorage() {
 // =====================================================================
 
 function isAppBusy() {
-  return isTranscribing || isExtracting ||
-    !!(mediaRecorder && (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused'));
+  if (isTranscribing || isExtracting) return true;
+  if (mediaRecorder && (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused')) return true;
+  if (currentAudioBlob || currentRecordingSessionId || currentDraftId) return true;
+  if (currentTranscriptText && currentTranscriptText.trim()) return true;
+  return false;
 }
 
-function discardActiveRecording() {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.ondataavailable = null;
-    mediaRecorder.onstop = null;
-    mediaRecorder.onerror = null;
-    try { mediaRecorder.stop(); } catch (_) { /* already stopped */ }
+async function prepareForLock() {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  const sessionId = currentRecordingSessionId;
+  if (typeof mediaRecorder.requestData === 'function') {
+    try { mediaRecorder.requestData(); } catch (_) {}
   }
+  await new Promise((resolve) => {
+    const mr = mediaRecorder;
+    const prevOnStop = mr.onstop;
+    mr.onstop = async (ev) => {
+      try { if (typeof prevOnStop === 'function') await prevOnStop.call(mr, ev); } catch (_) {}
+      resolve();
+    };
+    try { mr.stop(); } catch (_) { resolve(); }
+    setTimeout(resolve, 8000);
+  });
+  if (sessionId) await recordingSession.waitForPendingChunks(sessionId);
+}
+
+function cleanupRecordingUI() {
+  mediaRecorder = null;
   recordingStream?.getTracks().forEach(t => t.stop());
   recordingStream = null;
   recordingChunks = [];
-  mediaRecorder = null;
+  recordingChunkIndex = 0;
   if (recordingTimerInterval) { clearInterval(recordingTimerInterval); recordingTimerInterval = null; }
   if (recordingLimitInterval) { clearInterval(recordingLimitInterval); recordingLimitInterval = null; }
   recordBtn.textContent = 'Record';
   recordBtn.classList.remove('stop');
   recordingIndicator.classList.remove('visible');
   pauseRecordBtn.style.display = 'none';
-  window.onbeforeunload = null;
 }
 
 function handleLocked() {
-  discardActiveRecording();
+  cleanupRecordingUI();
 
   // Current (unsaved) transcript + audio
   currentTranscriptText = '';
   currentChunks = [];
+  currentRecordingSessionId = null;
+  currentDraftId = null;
   resultEl.textContent = 'Record or upload audio to transcribe.';
   resultEl.className = '';
   saveBtn.disabled = true;
@@ -1295,6 +1728,7 @@ async function onUnlocked() {
   loadTemplate();
   loadSavedList();
   probeWebGpu();
+  await checkRecovery();
 }
 
 loginForm.addEventListener('submit', async (e) => {
@@ -1325,7 +1759,7 @@ loginForm.addEventListener('submit', async (e) => {
 
 lockBtn.addEventListener('click', () => auth.lock());
 
-auth.configureAutoLock({ onLock: handleLocked, isBusy: isAppBusy });
+auth.configureAutoLock({ onPrepareLock: prepareForLock, onLock: handleLocked, isBusy: isAppBusy });
 
 // --- Init ---
 if ([...modelSelect.options].some(o => o.value === DEFAULT_MODEL)) {

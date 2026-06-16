@@ -11,7 +11,7 @@ import { getSession } from './auth.js';
 import { encryptJSON, decryptJSON, encryptBlob, decryptBlob } from './crypto-store.js';
 
 const DB_NAME = 'whisper-local';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 let dbPromise = null;
 
@@ -43,6 +43,16 @@ function openDb() {
       if (!db.objectStoreNames.contains('dictionaries')) {
         const store = db.createObjectStore('dictionaries', { keyPath: 'id' });
         store.createIndex('owner', 'owner');
+      }
+      // v5: crash-safe recording sessions + encrypted chunk store.
+      if (!db.objectStoreNames.contains('recordingSessions')) {
+        const store = db.createObjectStore('recordingSessions', { keyPath: 'id' });
+        store.createIndex('owner', 'owner');
+        store.createIndex('status', 'status');
+      }
+      if (!db.objectStoreNames.contains('recordingChunks')) {
+        const store = db.createObjectStore('recordingChunks', { keyPath: ['sessionId', 'index'] });
+        store.createIndex('sessionId', 'sessionId');
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -126,12 +136,20 @@ export async function deleteTranscript(id) {
   if (!row) return;
   if (row.owner !== userId) throw new Error('Transcript belongs to another user');
   let recordingId = null;
+  let recordingSessionId = null;
   try {
     const payload = await decryptJSON(row.iv, row.ciphertext);
     recordingId = payload.recordingId || null;
+    recordingSessionId = payload.recordingSessionId || null;
   } catch (_) { /* corrupt record: still delete the row itself */ }
   await tx(db, 'transcripts', 'readwrite', (store) => store.delete(id));
   if (recordingId) await deleteRecording(recordingId);
+  if (recordingSessionId) await deleteRecordingSession(recordingSessionId);
+}
+
+export async function listDraftTranscripts() {
+  const items = await listTranscripts();
+  return items.filter((t) => t.status === 'draft');
 }
 
 // --- Recordings ---
@@ -313,4 +331,78 @@ export async function deleteDictionaryEntry(id) {
   if (!row) return;
   if (row.owner !== userId) throw new Error('Entry belongs to another user');
   await tx(db, 'dictionaries', 'readwrite', (store) => store.delete(id));
+}
+
+// --- Recording sessions (crash-safe incremental recording) ---
+// Session row: { id, owner, mimeType, startedAt, status, chunkCount, lastChunkAt }
+// Chunk row: { sessionId, index, iv, ciphertext }
+
+export async function saveRecordingSession(session) {
+  const { userId } = getSession();
+  const db = await openDb();
+  const row = { ...session, owner: userId };
+  await tx(db, 'recordingSessions', 'readwrite', (store) => store.put(row));
+  return row;
+}
+
+export async function getRecordingSession(id) {
+  const { userId } = getSession();
+  const db = await openDb();
+  const row = await tx(db, 'recordingSessions', 'readonly', (store) => store.get(id));
+  if (!row || row.owner !== userId) return null;
+  return row;
+}
+
+export async function updateRecordingSession(id, patch) {
+  const existing = await getRecordingSession(id);
+  if (!existing) throw new Error('Recording session not found');
+  return saveRecordingSession({ ...existing, ...patch, id });
+}
+
+export async function listRecordingSessions({ status } = {}) {
+  const { userId } = getSession();
+  const db = await openDb();
+  const rows = await tx(db, 'recordingSessions', 'readonly', (store) => store.getAll());
+  return rows
+    .filter((r) => r.owner === userId && (!status || r.status === status))
+    .sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''));
+}
+
+export async function saveRecordingChunk(sessionId, index, iv, ciphertext) {
+  const session = await getRecordingSession(sessionId);
+  if (!session) throw new Error('Recording session not found');
+  const db = await openDb();
+  await tx(db, 'recordingChunks', 'readwrite', (store) => store.put({ sessionId, index, iv, ciphertext }));
+}
+
+export async function getRecordingChunks(sessionId, startIndex = 0, count = Infinity) {
+  const session = await getRecordingSession(sessionId);
+  if (!session) throw new Error('Recording session not found');
+  const db = await openDb();
+  const rows = await tx(db, 'recordingChunks', 'readonly', (store) => {
+    const idx = store.index('sessionId');
+    return idx.getAll(sessionId);
+  });
+  rows.sort((a, b) => a.index - b.index);
+  const end = count === Infinity ? rows.length : startIndex + count;
+  return rows.filter((r) => r.index >= startIndex && r.index < end);
+}
+
+export async function deleteRecordingSession(sessionId) {
+  const session = await getRecordingSession(sessionId);
+  if (!session) return;
+  const db = await openDb();
+  const chunks = await tx(db, 'recordingChunks', 'readonly', (store) => {
+    const idx = store.index('sessionId');
+    return idx.getAll(sessionId);
+  });
+  await new Promise((resolve, reject) => {
+    const t = db.transaction(['recordingSessions', 'recordingChunks'], 'readwrite');
+    t.objectStore('recordingSessions').delete(sessionId);
+    const chunkStore = t.objectStore('recordingChunks');
+    for (const c of chunks) chunkStore.delete([c.sessionId, c.index]);
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error || new Error('Transaction aborted'));
+  });
 }

@@ -135,3 +135,31 @@ export function extractWhisperConfidence(segments) {
   }
   return segments;
 }
+
+// Shift Whisper timestamp chunks by a time offset (seconds) when merging segments.
+export function offsetChunks(chunks, offsetSec) {
+  if (!offsetSec || !Array.isArray(chunks)) return chunks || [];
+  return chunks.map((chunk) => {
+    if (!chunk || !Array.isArray(chunk.timestamp)) return chunk;
+    const [start, end] = chunk.timestamp;
+    return {
+      ...chunk,
+      timestamp: [
+        typeof start === 'number' ? start + offsetSec : start,
+        typeof end === 'number' ? end + offsetSec : end,
+      ],
+    };
+  });
+}
+
+export function mergeChunkArrays(existing, segmentChunks, offsetSec) {
+  return [...(existing || []), ...offsetChunks(segmentChunks || [], offsetSec)];
+}
+
+export function mergeTranscriptionText(existing, segmentText) {
+  const left = (existing || '').trimEnd();
+  const right = (segmentText || '').trim();
+  if (!left) return right;
+  if (!right) return left;
+  return left + ' ' + right;
+}

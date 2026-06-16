@@ -19,9 +19,9 @@ export const APPROVED_ACCESS_TOKENS = [
 // existing tokens AND all encrypted data — set it once, before rollout.
 export const PBKDF2_ITERATIONS = 600000;
 
-// Inactivity auto-lock, in minutes. Active recording/transcription does not
-// count as inactivity.
-export const AUTO_LOCK_MINUTES = 5;
+// Inactivity auto-lock, in minutes. Active recording/transcription and unsaved
+// audio or drafts do not count as inactivity.
+export const AUTO_LOCK_MINUTES = 30;
 
 // Default Whisper model (multilingual). Options offered in the UI:
 //   'onnx-community/whisper-large-v3-turbo' — fast + accurate (default)

@@ -4,14 +4,9 @@ import * as db from './db.js';
 import * as recordingSession from './recording-session.js';
 import { decodeToMono16k } from './audio-decode.js';
 import { splitIntoSegments, mergeChunkArrays, mergeTranscriptionText } from './segments.js';
+import { draftTitle, t } from './i18n.js';
 
 export { SEGMENT_MINUTES, CHUNKS_PER_SEGMENT } from './recording-session.js';
-
-function draftTitle() {
-  const d = new Date();
-  return 'Draft — ' + d.toLocaleDateString(undefined, { dateStyle: 'short' }) + ' ' +
-    d.toLocaleTimeString(undefined, { timeStyle: 'short' });
-}
 
 export async function createDraftForSession(sessionId, { language, modelId } = {}) {
   const session = await recordingSession.getSession(sessionId);
@@ -91,7 +86,7 @@ export async function transcribeRecordingSession(sessionId, draftId, {
     const count = Math.min(recordingSession.CHUNKS_PER_SEGMENT, remaining);
     if (count <= 0) break;
 
-    onProgress?.({ segment: seg + 1, totalSegments, message: `Transcribing segment ${seg + 1} of ${totalSegments}…` });
+    onProgress?.({ segment: seg + 1, totalSegments, message: t('status.segmentProgress', { current: seg + 1, total: totalSegments }) });
 
     const segmentBlob = await recordingSession.getSegmentBlob(sessionId, startIndex, count);
     if (!segmentBlob) break;

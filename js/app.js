@@ -19,6 +19,7 @@ import { createReviewUI } from './review-ui.js';
 import { createFormReviewUI, exportFinalForm, normalizePipelineForm } from './form-review-ui.js';
 import { assertFormGenerationAllowed } from './safety.js';
 import { probeWebGpuAvailable } from './webgpu-probe.js';
+import { t, applyStatic, onLangChange, toggleLang, getDefaultTemplate, getLang } from './i18n.js';
 
 // --- DOM ---
 const loginOverlay = document.getElementById('loginOverlay');
@@ -28,6 +29,7 @@ const loginPassword = document.getElementById('loginPassword');
 const loginSubmitBtn = document.getElementById('loginSubmitBtn');
 const loginError = document.getElementById('loginError');
 const lockBtn = document.getElementById('lockBtn');
+const langToggleBtn = document.getElementById('langToggleBtn');
 const engineBadge = document.getElementById('engineBadge');
 const modelStatus = document.getElementById('modelStatus');
 const progressWrap = document.getElementById('progressWrap');
@@ -127,7 +129,7 @@ worker.onmessage = (e) => {
   const msg = e.data;
   switch (msg.type) {
     case 'device': {
-      engineBadge.textContent = msg.device === 'webgpu' ? 'WebGPU' : 'WASM (CPU)';
+      engineBadge.textContent = msg.device === 'webgpu' ? t('engine.webgpu') : t('engine.wasm');
       engineBadge.className = 'badge ' + (msg.device === 'webgpu' ? 'webgpu' : 'wasm');
       break;
     }
@@ -139,7 +141,11 @@ worker.onmessage = (e) => {
         const pct = Math.min(100, Math.round((loaded / total) * 100));
         progressWrap.classList.add('visible');
         progressBar.style.width = pct + '%';
-        modelStatus.textContent = `Downloading model… ${pct}% (${(loaded / 1048576).toFixed(0)} / ${(total / 1048576).toFixed(0)} MB)`;
+        modelStatus.textContent = t('engine.downloading', {
+          pct,
+          loaded: (loaded / 1048576).toFixed(0),
+          total: (total / 1048576).toFixed(0),
+        });
       }
       break;
     }
@@ -148,7 +154,7 @@ worker.onmessage = (e) => {
       progressWrap.classList.remove('visible');
       progressBar.style.width = '0%';
       fileProgress.clear();
-      modelStatus.textContent = `Model ready: ${shortModelName(msg.modelId)} (cached for offline use).`;
+      modelStatus.textContent = t('engine.ready', { model: shortModelName(msg.modelId) });
       if (pendingLoad && pendingLoad.modelId === msg.modelId) {
         pendingLoad.resolve();
         pendingLoad = null;
@@ -173,11 +179,11 @@ worker.onmessage = (e) => {
         job.reject(err);
       } else if (pendingLoad) {
         progressWrap.classList.remove('visible');
-        modelStatus.textContent = 'Model failed to load: ' + err.message;
+        modelStatus.textContent = t('engine.loadFailed', { error: err.message });
         pendingLoad.reject(err);
         pendingLoad = null;
       } else {
-        showToast('Error: ' + err.message);
+        showToast(t('toast.error', { error: err.message }));
       }
       break;
     }
@@ -185,7 +191,7 @@ worker.onmessage = (e) => {
 };
 
 worker.onerror = (e) => {
-  modelStatus.textContent = 'Transcription engine failed to start: ' + (e.message || 'unknown error');
+  modelStatus.textContent = t('engine.workerFailed', { error: e.message || 'unknown error' });
   if (pendingLoad) { pendingLoad.reject(new Error(e.message || 'Worker failed')); pendingLoad = null; }
   for (const [id, job] of pendingJobs) {
     job.reject(new Error(e.message || 'Worker failed'));
@@ -203,7 +209,7 @@ function ensureModelLoaded() {
   if (pendingLoad && pendingLoad.modelId === modelId) return pendingLoad.promise;
   modelReady = null;
   fileProgress.clear();
-  modelStatus.textContent = `Loading ${shortModelName(modelId)}…`;
+  modelStatus.textContent = t('engine.loading', { model: shortModelName(modelId) });
   let resolve, reject;
   const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
   pendingLoad = { modelId, resolve, reject, promise };
@@ -239,7 +245,7 @@ function setResult(text, isError = false) {
 }
 
 function setLoading(message) {
-  resultEl.textContent = message || 'Transcribing…';
+  resultEl.textContent = message || t('status.transcribing');
   resultEl.className = 'loading';
   saveBtn.disabled = true;
   downloadBtn.disabled = true;
@@ -327,9 +333,9 @@ function showRecoveryBanner(recovery) {
   if (recoveryMessage) recoveryMessage.textContent = recovery.message || '';
   if (recoveryRecoverBtn) {
     if (recovery.type === 'draft') {
-      recoveryRecoverBtn.textContent = recovery.resume ? 'Resume' : 'Open draft';
+      recoveryRecoverBtn.textContent = recovery.resume ? t('recovery.resume') : t('recovery.openDraft');
     } else {
-      recoveryRecoverBtn.textContent = 'Recover audio';
+      recoveryRecoverBtn.textContent = t('recovery.recoverAudio');
     }
   }
   recoveryBanner?.classList.add('visible');
@@ -345,7 +351,7 @@ async function restoreDraftWorkspace(draftId) {
   if (draft.text) {
     setResult(draft.text);
   } else {
-    setResult('Draft loaded. Click Transcribe to continue.');
+    setResult(t('status.draftLoaded'));
   }
   if (draft.recordingSessionId) {
     const { blob } = await recordingSession.assembleSessionBlob(draft.recordingSessionId);
@@ -355,7 +361,7 @@ async function restoreDraftWorkspace(draftId) {
     if (rec?.blob) setCurrentAudio(rec.blob, { sessionId: null });
   }
   hideRecoveryBanner();
-  showToast('Draft restored to the transcribe panel.');
+  showToast(t('toast.draftRestored'));
   return draft;
 }
 
@@ -368,7 +374,7 @@ async function checkRecovery() {
       showRecoveryBanner({
         type: 'recording',
         sessionId: activeSession.id,
-        message: `Interrupted recording found (~${mins || '<1'} min saved). Recover the audio or discard.`,
+        message: t('recovery.interruptedRecording', { mins: mins || '<1' }),
       });
       return;
     }
@@ -376,15 +382,15 @@ async function checkRecovery() {
     const drafts = await db.listDraftTranscripts();
     const incomplete = drafts.find((d) => transcribeSegments.isTranscriptionIncomplete(d));
     if (incomplete) {
-      const t = incomplete.transcription || {};
-      const progress = t.monolithic
-        ? 'Transcription was interrupted.'
-        : `Transcription in progress (${t.completedSegments || 0}/${t.totalSegments || '?'} segments).`;
+      const tr = incomplete.transcription || {};
+      const progress = tr.monolithic
+        ? t('recovery.transcriptionInterrupted')
+        : t('recovery.transcriptionProgress', { done: tr.completedSegments || 0, total: tr.totalSegments || '?' });
       showRecoveryBanner({
         type: 'draft',
         draftId: incomplete.id,
         resume: true,
-        message: progress + ' Open the draft to continue.',
+        message: progress + t('recovery.openDraftContinue'),
       });
       return;
     }
@@ -395,7 +401,7 @@ async function checkRecovery() {
         type: 'draft',
         draftId: withWork.id,
         resume: false,
-        message: 'Unsaved draft with audio and/or transcript found. Open it to continue, or discard.',
+        message: t('recovery.unsavedDraft'),
       });
       return;
     }
@@ -407,7 +413,7 @@ async function checkRecovery() {
       showRecoveryBanner({
         type: 'recording',
         sessionId: s.id,
-        message: `Recorded audio found (~${mins || '<1'} min, not yet transcribed). Recover it or discard.`,
+        message: t('recovery.orphanAudio', { mins: mins || '<1' }),
       });
     }
   } catch (e) {
@@ -421,11 +427,11 @@ async function recoverRecordingSession(sessionId) {
     currentRecordingSessionId = sessionId;
     currentDraftId = null;
     setCurrentAudio(blob, { sessionId });
-    setResult('Recovered recording. Pick model and language, then click Transcribe.');
+    setResult(t('status.recoveredListen'));
     hideRecoveryBanner();
-    showToast('Recording recovered.');
+    showToast(t('toast.recordingRecovered'));
   } catch (e) {
-    showToast('Could not recover recording: ' + e.message);
+    showToast(t('toast.recordingRecoverFailed', { error: e.message }));
   }
 }
 
@@ -438,7 +444,7 @@ const persistDraftPartial = debounce(async (patch) => {
 
 async function runMonolithicTranscription(blob, onPartialTarget) {
   if (blob.size >= UPLOAD_WARN_BYTES) {
-    showToast('Large file: transcription loads the full audio into memory. Recording in-app is safer for long sessions.', 8000);
+    showToast(t('toast.largeFile'), 8000);
   }
   const language = languageSelect.value || null;
   if (currentDraftId) {
@@ -514,7 +520,7 @@ transcribeBtn.addEventListener('click', async () => {
   isTranscribing = true;
   transcribeBtn.disabled = true;
   updateBeforeUnload();
-  setLoading('Preparing audio…');
+  setLoading(t('status.preparing'));
   try {
     const { text, chunks } = await runTranscription(currentAudioBlob, (partial) => {
       if (!auth.isUnlocked()) return;
@@ -535,13 +541,13 @@ transcribeBtn.addEventListener('click', async () => {
         const draft = await db.getTranscript(currentDraftId);
         if (draft?.text) {
           setResult(draft.text);
-          showToast('Transcription stopped: ' + err.message + ' Draft saved — you can resume.', 6000);
+          showToast(t('toast.transcriptionStopped', { error: err.message }), 6000);
           loadSavedList();
           return;
         }
       } catch (_) { /* fall through */ }
     }
-    setResult('Transcription failed: ' + err.message, true);
+    setResult(t('status.transcriptionFailed', { error: err.message }), true);
   } finally {
     isTranscribing = false;
     transcribeBtn.disabled = false;
@@ -571,7 +577,7 @@ pauseRecordBtn.addEventListener('click', () => {
       recordingPausedAt = Date.now();
       recordingIndicator.classList.add('paused');
       recordingPausedEl.classList.remove('hidden');
-      pauseRecordBtn.textContent = 'Resume';
+      pauseRecordBtn.textContent = t('transcribe.resume');
     } catch (_) { /* pause not supported */ }
   } else if (mediaRecorder.state === 'paused') {
     try {
@@ -580,7 +586,7 @@ pauseRecordBtn.addEventListener('click', () => {
       recordingPausedAt = null;
       recordingIndicator.classList.remove('paused');
       recordingPausedEl.classList.add('hidden');
-      pauseRecordBtn.textContent = 'Pause';
+      pauseRecordBtn.textContent = t('transcribe.pause');
     } catch (_) { /* resume not supported */ }
   }
 });
@@ -593,9 +599,7 @@ recordBtn.addEventListener('click', async () => {
   try {
     const active = await recordingSession.getActiveSession();
     if (active && active.chunkCount > 0) {
-      const discard = window.confirm(
-        'An unfinished recording exists. Click OK to discard it and start a new recording, or Cancel to keep it and use Recover on the banner.',
-      );
+      const discard = window.confirm(t('confirm.discardRecording'));
       if (!discard) return;
       await recordingSession.abandonSession(active.id);
       hideRecoveryBanner();
@@ -622,14 +626,14 @@ recordBtn.addEventListener('click', async () => {
       recordingChunks.push(e.data);
       const idx = recordingChunkIndex++;
       recordingSession.appendChunk(sessionId, idx, e.data).catch((err) => {
-        showToast('Could not save recording chunk: ' + err.message);
+        showToast(t('toast.chunkSaveFailed', { error: err.message }));
       });
     };
 
     mediaRecorder.onstop = async () => {
       recordingStream?.getTracks().forEach(t => t.stop());
       recordingStream = null;
-      recordBtn.textContent = 'Record';
+      recordBtn.textContent = t('transcribe.record');
       recordBtn.classList.remove('stop');
       if (recordingTimerInterval) { clearInterval(recordingTimerInterval); recordingTimerInterval = null; }
       if (recordingLimitInterval) { clearInterval(recordingLimitInterval); recordingLimitInterval = null; }
@@ -640,7 +644,7 @@ recordBtn.addEventListener('click', async () => {
       if (!recordingChunks.length && !recordingChunkIndex) {
         if (currentRecordingSessionId) await recordingSession.abandonSession(currentRecordingSessionId);
         currentRecordingSessionId = null;
-        setResult('Recording produced no audio.', true);
+        setResult(t('status.recordingNoAudio'), true);
         return;
       }
 
@@ -659,23 +663,23 @@ recordBtn.addEventListener('click', async () => {
             loadSavedList();
           } catch (_) { /* draft is optional; recovery banner still works */ }
         }
-        setResult('Listen back, pick model and language, then click Transcribe.');
+        setResult(t('status.listenThenTranscribe'));
       } catch (e) {
         const blob = new Blob(recordingChunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
         recordingChunks = [];
         setCurrentAudio(blob, { sessionId: currentRecordingSessionId });
-        setResult('Listen back, pick model and language, then click Transcribe.');
-        showToast('Recording saved in memory; re-unlock if playback fails.');
+        setResult(t('status.listenThenTranscribe'));
+        showToast(t('toast.recordingInMemory'));
       }
     };
 
     mediaRecorder.onerror = (e) => {
-      setResult('Recording error: ' + (e.error?.message || 'unknown'), true);
+      setResult(t('status.recordingError', { error: e.error?.message || 'unknown' }), true);
       if (mediaRecorder?.state === 'recording') mediaRecorder.stop();
     };
 
     mediaRecorder.start(recordingSession.CHUNK_TIMESLICE_MS);
-    recordBtn.textContent = 'Stop';
+    recordBtn.textContent = t('transcribe.stop');
     recordBtn.classList.add('stop');
     updateBeforeUnload();
 
@@ -688,7 +692,7 @@ recordBtn.addEventListener('click', async () => {
     recordingIndicator.classList.add('visible');
     if (typeof mediaRecorder.pause === 'function') {
       pauseRecordBtn.style.display = '';
-      pauseRecordBtn.textContent = 'Pause';
+      pauseRecordBtn.textContent = t('transcribe.pause');
     }
     recordingTimerInterval = setInterval(() => {
       let elapsed = Date.now() - recordingStartTime - recordingPausedDuration;
@@ -703,12 +707,12 @@ recordBtn.addEventListener('click', async () => {
         recordingLimitInterval = null;
         if (mediaRecorder && (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused')) {
           mediaRecorder.stop();
-          showToast('Recording stopped at 3-hour limit.');
+          showToast(t('toast.recordingLimit'));
         }
       }
     }, 30000);
   } catch (e) {
-    setResult('Microphone error: ' + e.message, true);
+    setResult(t('status.microphoneError', { error: e.message }), true);
   }
 });
 
@@ -719,7 +723,7 @@ fileInput.addEventListener('change', async () => {
   currentRecordingSessionId = null;
   currentDraftId = null;
   setCurrentAudio(file, { sessionId: null });
-  setResult('Saving upload…');
+  setResult(t('status.savingUpload'));
   try {
     const recordingId = crypto.randomUUID() + '.audio';
     await db.saveRecording(recordingId, file, file.type);
@@ -729,11 +733,11 @@ fileInput.addEventListener('change', async () => {
     });
     currentDraftId = draft.id;
     loadSavedList();
-    setResult('Listen back, pick model and language, then click Transcribe.');
+    setResult(t('status.listenThenTranscribe'));
     updateBeforeUnload();
   } catch (e) {
-    setResult('Listen back, pick model and language, then click Transcribe.');
-    showToast('Could not persist upload: ' + e.message);
+    setResult(t('status.listenThenTranscribe'));
+    showToast(t('toast.uploadPersistFailed', { error: e.message }));
   }
   fileInput.value = '';
 });
@@ -742,7 +746,7 @@ fileInput.addEventListener('change', async () => {
 saveBtn.addEventListener('click', async () => {
   const text = currentTranscriptText.trim();
   if (!text) return;
-  const title = (window.prompt('Title for this transcript (optional):', '') || '').trim() || 'Untitled';
+  const title = (window.prompt(t('prompt.saveTitle'), '') || '').trim() || t('saved.untitled');
   try {
     const id = currentDraftId || crypto.randomUUID();
     const raw = (pipeline && pipeline.id === null && pipeline.raw)
@@ -783,11 +787,11 @@ saveBtn.addEventListener('click', async () => {
     }
     if (pipeline && pipeline.id === null) { pipeline.id = id; pipeline.title = title; }
     currentDraftId = id;
-    showToast('Saved as "' + title + '".');
+    showToast(t('toast.savedAs', { title }));
     loadSavedList();
     updateBeforeUnload();
   } catch (e) {
-    showToast('Save failed: ' + e.message);
+    showToast(t('toast.saveFailed', { error: e.message }));
   }
 });
 
@@ -798,25 +802,27 @@ downloadBtn.addEventListener('click', () => {
 // --- Saved transcripts list ---
 function renderSavedList(items) {
   if (!items || items.length === 0) {
-    savedListEl.innerHTML = '<li class="empty-state">No saved transcripts yet. Transcribe and click Save.</li>';
+    savedListEl.innerHTML = '<li class="empty-state">' + escapeHtml(t('saved.empty')) + '</li>';
     return;
   }
-  savedListEl.innerHTML = items.map(t => {
-    const isDraft = t.status === 'draft';
-    const tr = t.transcription || {};
+  savedListEl.innerHTML = items.map(item => {
+    const isDraft = item.status === 'draft';
+    const tr = item.transcription || {};
     let draftMeta = '';
     if (isDraft && tr.totalSegments && !tr.monolithic) {
-      draftMeta = ` <span class="item-date">(${tr.completedSegments || 0}/${tr.totalSegments} segments)</span>`;
+      draftMeta = ` <span class="item-date">${t('saved.segments', { done: tr.completedSegments || 0, total: tr.totalSegments })}</span>`;
     } else if (isDraft && tr.monolithic && !tr.complete) {
-      draftMeta = ' <span class="item-date">(transcribing…)</span>';
+      draftMeta = ` <span class="item-date">${t('saved.transcribing')}</span>`;
     }
+    const untitled = t('saved.untitled');
+    const draftLabel = t('saved.draft');
     return `
-    <li data-id="${t.id}">
-      <span class="item-title" title="${escapeHtml(t.title || 'Untitled')}">${escapeHtml(t.title || 'Untitled')}${isDraft ? '<span class="badge draft">Draft</span>' : ''}${draftMeta}</span>
-      <span class="item-date">${formatDate(t.createdAt)}</span>
+    <li data-id="${item.id}">
+      <span class="item-title" title="${escapeHtml(item.title || untitled)}">${escapeHtml(item.title || untitled)}${isDraft ? `<span class="badge draft">${draftLabel}</span>` : ''}${draftMeta}</span>
+      <span class="item-date">${formatDate(item.createdAt)}</span>
       <span class="item-actions">
-        <button type="button" class="open-btn">Open</button>
-        <button type="button" class="danger delete-btn">Delete</button>
+        <button type="button" class="open-btn">${t('saved.open')}</button>
+        <button type="button" class="danger delete-btn">${t('saved.delete')}</button>
       </span>
     </li>`;
   }).join('');
@@ -833,7 +839,7 @@ async function loadSavedList() {
     const items = await db.listTranscripts();
     renderSavedList(items);
   } catch (e) {
-    savedListEl.innerHTML = '<li class="empty-state error">Failed to load list.</li>';
+    savedListEl.innerHTML = '<li class="empty-state error">' + escapeHtml(t('saved.loadFailed')) + '</li>';
   }
 }
 
@@ -847,41 +853,41 @@ function exitEditMode() {
 
 async function openTranscript(id) {
   try {
-    const t = await db.getTranscript(id);
-    if (!t) throw new Error('Not found');
-    if (t.status === 'draft') {
+    const entry = await db.getTranscript(id);
+    if (!entry) throw new Error('Not found');
+    if (entry.status === 'draft') {
       await restoreDraftWorkspace(id);
-      if (transcribeSegments.isTranscriptionIncomplete(t)) {
-        showToast('Draft restored. Click Transcribe to resume, or Save when done.');
+      if (transcribeSegments.isTranscriptionIncomplete(entry)) {
+        showToast(t('toast.draftRestoredResume'));
       }
       return;
     }
-    currentDetailTranscript = t;
+    currentDetailTranscript = entry;
     exitEditMode();
-    detailTitle.textContent = t.title || 'Untitled';
-    detailContent.textContent = t.text || '';
+    detailTitle.textContent = entry.title || t('saved.untitled');
+    detailContent.textContent = entry.text || '';
     if (detailAudioObjectUrl) { URL.revokeObjectURL(detailAudioObjectUrl); detailAudioObjectUrl = null; }
-    if (t.recordingId) {
-      const rec = await db.getRecording(t.recordingId);
+    if (entry.recordingId) {
+      const rec = await db.getRecording(entry.recordingId);
       if (rec && rec.blob) {
         detailAudioObjectUrl = URL.createObjectURL(rec.blob);
         detailRecordingSection.classList.remove('hidden');
         detailAudio.src = detailAudioObjectUrl;
         detailDownloadAudioLink.href = detailAudioObjectUrl;
         const ext = (rec.mimeType || '').includes('webm') ? '.webm' : '';
-        detailDownloadAudioLink.download = (t.title || 'recording').replace(/\s+/g, '_') + (ext || '.audio');
+        detailDownloadAudioLink.download = (entry.title || 'recording').replace(/\s+/g, '_') + (ext || '.audio');
       } else {
         detailRecordingSection.classList.add('hidden');
       }
-    } else if (t.recordingSessionId) {
+    } else if (entry.recordingSessionId) {
       try {
-        const { blob, mimeType } = await recordingSession.assembleSessionBlob(t.recordingSessionId);
+        const { blob, mimeType } = await recordingSession.assembleSessionBlob(entry.recordingSessionId);
         detailAudioObjectUrl = URL.createObjectURL(blob);
         detailRecordingSection.classList.remove('hidden');
         detailAudio.src = detailAudioObjectUrl;
         detailDownloadAudioLink.href = detailAudioObjectUrl;
         const ext = (mimeType || '').includes('webm') ? '.webm' : '';
-        detailDownloadAudioLink.download = (t.title || 'recording').replace(/\s+/g, '_') + (ext || '.audio');
+        detailDownloadAudioLink.download = (entry.title || 'recording').replace(/\s+/g, '_') + (ext || '.audio');
       } catch (_) {
         detailRecordingSection.classList.add('hidden');
       }
@@ -891,22 +897,22 @@ async function openTranscript(id) {
       detailDownloadAudioLink.href = '#';
     }
     // Restore any saved review/form pipeline so the clinician can continue.
-    if (t.correction || t.form) {
-      loadPipelineFromEntry(t);
+    if (entry.correction || entry.form) {
+      loadPipelineFromEntry(entry);
     } else {
       resetPipelineUI();
     }
     detailPanel.classList.remove('hidden');
     updateBusyButtons();
   } catch (e) {
-    showToast('Could not open transcript.');
+    showToast(t('toast.openFailed'));
   }
 }
 
 async function removeTranscript(id) {
   try {
     await db.deleteTranscript(id);
-    showToast('Deleted.');
+    showToast(t('toast.deleted'));
     if (currentDetailTranscript && currentDetailTranscript.id === id) {
       detailPanel.classList.add('hidden');
       currentDetailTranscript = null;
@@ -914,7 +920,7 @@ async function removeTranscript(id) {
     if (pipeline && pipeline.id === id) resetPipelineUI();
     loadSavedList();
   } catch (e) {
-    showToast('Could not delete.');
+    showToast(t('toast.deleteFailed'));
   }
 }
 
@@ -945,45 +951,45 @@ detailSaveEditBtn.addEventListener('click', async () => {
     currentDetailTranscript = updated;
     detailContent.textContent = updated.text || '';
     exitEditMode();
-    showToast('Saved changes.');
+    showToast(t('toast.changesSaved'));
   } catch (e) {
-    showToast('Could not save changes.');
+    showToast(t('toast.changesSaveFailed'));
   }
 });
 
 detailRenameBtn.addEventListener('click', async () => {
   if (!currentDetailTranscript) return;
-  const newTitle = (window.prompt('New title:', currentDetailTranscript.title || 'Untitled') || '').trim();
+  const newTitle = (window.prompt(t('prompt.renameTitle'), currentDetailTranscript.title || t('saved.untitled')) || '').trim();
   if (!newTitle) return;
   try {
     const updated = await db.updateTranscript(currentDetailTranscript.id, { title: newTitle });
     currentDetailTranscript = updated;
     detailTitle.textContent = newTitle;
-    showToast('Renamed.');
+    showToast(t('toast.renamed'));
     loadSavedList();
   } catch (e) {
-    showToast('Could not rename.');
+    showToast(t('toast.renameFailed'));
   }
 });
 
 detailDownloadBtn.addEventListener('click', () => {
   if (!currentDetailTranscript) return;
-  const t = currentDetailTranscript;
-  const text = (pipeline && pipeline.id === t.id)
-    ? buildTranscriptExportText(pipeline, t.text || '')
-    : buildTranscriptExportText(t, t.text || '');
-  downloadAsTxt(text, (t.title || 'transcript').replace(/\s+/g, '_') + '.txt');
+  const entry = currentDetailTranscript;
+  const text = (pipeline && pipeline.id === entry.id)
+    ? buildTranscriptExportText(pipeline, entry.text || '')
+    : buildTranscriptExportText(entry, entry.text || '');
+  downloadAsTxt(text, (entry.title || 'transcript').replace(/\s+/g, '_') + '.txt');
 });
 
 // --- Detail: re-transcribe with currently selected model/language ---
 detailRetranscribeBtn.addEventListener('click', async () => {
   if (!currentDetailTranscript || !currentDetailTranscript.recordingId || isTranscribing) return;
   const rec = await db.getRecording(currentDetailTranscript.recordingId);
-  if (!rec || !rec.blob) { showToast('Recording not found.'); return; }
+  if (!rec || !rec.blob) { showToast(t('toast.recordingNotFound')); return; }
   isTranscribing = true;
   detailRetranscribeBtn.disabled = true;
   const originalText = currentDetailTranscript.text || '';
-  detailContent.textContent = 'Re-transcribing…';
+  detailContent.textContent = t('status.retranscribing');
   try {
     const { text, chunks } = await runMonolithicTranscription(rec.blob, (partial) => {
       if (!auth.isUnlocked()) return;
@@ -998,11 +1004,11 @@ detailRetranscribeBtn.addEventListener('click', async () => {
     currentDetailTranscript = updated;
     detailContent.textContent = text;
     detailResumeTranscribeBtn.style.display = 'none';
-    showToast('Transcript updated. Re-run "Improve & review".');
+    showToast(t('toast.retranscribeDone'));
   } catch (e) {
     if (!auth.isUnlocked()) return;
     detailContent.textContent = originalText;
-    showToast('Re-transcription failed: ' + e.message);
+    showToast(t('toast.retranscribeFailed', { error: e.message }));
   } finally {
     isTranscribing = false;
     detailRetranscribeBtn.disabled = false;
@@ -1012,7 +1018,7 @@ detailRetranscribeBtn.addEventListener('click', async () => {
 async function resumeDraftTranscription(draftId) {
   const draft = await db.getTranscript(draftId);
   if (!draft || !transcribeSegments.isTranscriptionIncomplete(draft)) {
-    showToast('Nothing to resume.');
+    showToast(t('toast.nothingToResume'));
     return;
   }
   currentDraftId = draft.id;
@@ -1033,7 +1039,7 @@ async function resumeDraftTranscription(draftId) {
       if (rec?.blob) setCurrentAudio(rec.blob, { sessionId: null });
     }
   } catch (e) {
-    showToast('Could not load audio: ' + e.message);
+    showToast(t('toast.audioLoadFailed', { error: e.message }));
     return;
   }
 
@@ -1041,7 +1047,7 @@ async function resumeDraftTranscription(draftId) {
   isTranscribing = true;
   transcribeBtn.disabled = true;
   updateBeforeUnload();
-  setLoading('Resuming transcription…');
+  setLoading(t('status.resuming'));
   try {
     const { text, chunks } = await runTranscription(currentAudioBlob, (partial) => {
       if (!auth.isUnlocked()) return;
@@ -1056,7 +1062,7 @@ async function resumeDraftTranscription(draftId) {
   } catch (err) {
     if (!auth.isUnlocked()) return;
     if (draft.text) setResult(draft.text);
-    showToast('Resume failed: ' + err.message, 6000);
+    showToast(t('toast.resumeFailed', { error: err.message }), 6000);
   } finally {
     isTranscribing = false;
     transcribeBtn.disabled = false;
@@ -1082,7 +1088,7 @@ recoveryRecoverBtn.addEventListener('click', async () => {
       }
     }
   } catch (e) {
-    showToast('Recovery failed: ' + e.message);
+    showToast(t('toast.recoveryFailed', { error: e.message }));
   }
 });
 
@@ -1094,17 +1100,17 @@ recoveryDiscardBtn.addEventListener('click', async () => {
       if (currentRecordingSessionId === pendingRecovery.sessionId) {
         currentRecordingSessionId = null;
       }
-      showToast('Discarded unfinished recording.');
+      showToast(t('toast.discardedRecording'));
     } else if (pendingRecovery.draftId) {
       await db.deleteTranscript(pendingRecovery.draftId);
       if (currentDraftId === pendingRecovery.draftId) currentDraftId = null;
-      showToast('Discarded draft.');
+      showToast(t('toast.discardedDraft'));
       loadSavedList();
     }
     hideRecoveryBanner();
     await checkRecovery();
   } catch (e) {
-    showToast('Discard failed: ' + e.message);
+    showToast(t('toast.discardFailed', { error: e.message }));
   }
 });
 
@@ -1112,7 +1118,7 @@ recoveryDiscardBtn.addEventListener('click', async () => {
 modelSelect.addEventListener('change', () => {
   const modelId = modelSelect.value;
   if (modelReady && modelReady.modelId !== modelId) {
-    modelStatus.textContent = `Model will switch to ${shortModelName(modelId)} on next transcription.`;
+    modelStatus.textContent = t('engine.willSwitch', { model: shortModelName(modelId) });
   }
 });
 
@@ -1120,19 +1126,12 @@ modelSelect.addEventListener('change', () => {
 // Medical form filling (local LLM via Web-LLM, see js/llm-worker.js)
 // =====================================================================
 
-const DEFAULT_TEMPLATE = [
-  { name: 'Reason for visit', hint: 'Why the patient came in' },
-  { name: 'Symptoms', hint: 'Symptoms reported by the patient, with onset and duration' },
-  { name: 'Findings', hint: 'Observations or examination findings mentioned by the clinician' },
-  { name: 'Plan / medication', hint: 'Recommended actions, prescriptions with dosage, follow-up' },
-];
-
-let templateFields = DEFAULT_TEMPLATE.map(f => ({ ...f }));
+let templateFields = getDefaultTemplate().map(f => ({ ...f }));
 
 // --- Template editor ---
 const persistTemplate = debounce(() => {
   if (!auth.isUnlocked()) return;
-  db.saveFormTemplate(templateFields).catch(() => showToast('Could not save form template.'));
+  db.saveFormTemplate(templateFields).catch(() => showToast(t('toast.templateSaveFailed')));
 }, 600);
 
 function renderTemplateEditor() {
@@ -1144,14 +1143,14 @@ function renderTemplateEditor() {
     const nameInput = document.createElement('input');
     nameInput.type = 'text';
     nameInput.className = 'field-name';
-    nameInput.placeholder = 'Field name';
+    nameInput.placeholder = t('form.fieldName');
     nameInput.value = field.name;
     nameInput.addEventListener('input', () => { templateFields[i].name = nameInput.value; persistTemplate(); });
 
     const hintInput = document.createElement('input');
     hintInput.type = 'text';
     hintInput.className = 'field-hint';
-    hintInput.placeholder = 'Hint for the AI (optional)';
+    hintInput.placeholder = t('form.fieldHint');
     hintInput.value = field.hint || '';
     hintInput.addEventListener('input', () => { templateFields[i].hint = hintInput.value; persistTemplate(); });
 
@@ -1159,7 +1158,7 @@ function renderTemplateEditor() {
     removeBtn.type = 'button';
     removeBtn.className = 'danger';
     removeBtn.textContent = '✕';
-    removeBtn.title = 'Remove field';
+    removeBtn.title = t('form.removeField');
     removeBtn.addEventListener('click', () => {
       templateFields.splice(i, 1);
       renderTemplateEditor();
@@ -1178,7 +1177,7 @@ addFieldBtn.addEventListener('click', () => {
 });
 
 resetTemplateBtn.addEventListener('click', () => {
-  templateFields = DEFAULT_TEMPLATE.map(f => ({ ...f }));
+  templateFields = getDefaultTemplate().map(f => ({ ...f }));
   renderTemplateEditor();
   persistTemplate();
 });
@@ -1233,11 +1232,11 @@ function getLlmWorker() {
     const msg = e.data;
     switch (msg.type) {
       case 'progress':
-        setLlmProgress(msg.text || 'Loading local assistant…', msg.progress);
+        setLlmProgress(msg.text || t('llm.loading'), msg.progress);
         break;
       case 'ready':
         llmModelReady = true;
-        setLlmProgress('Local assistant ready: Qwen2.5 1.5B (cached for offline use).');
+        setLlmProgress(t('llm.ready'));
         break;
       case 'complete': {
         const job = pendingLlm.get(msg.id);
@@ -1251,7 +1250,7 @@ function getLlmWorker() {
           pendingLlm.delete(msg.id);
           job.reject(err);
         } else {
-          setLlmProgress('Local assistant error: ' + err.message);
+          setLlmProgress(t('llm.error', { error: err.message }));
         }
         break;
       }
@@ -1259,7 +1258,7 @@ function getLlmWorker() {
   };
   llmWorker.onerror = (e) => {
     const err = new Error(e.message || 'Local assistant worker failed');
-    setLlmProgress('Local assistant failed to start: ' + err.message);
+    setLlmProgress(t('llm.workerFailed', { error: err.message }));
     for (const [id, job] of pendingLlm) {
       job.reject(err);
       pendingLlm.delete(id);
@@ -1303,16 +1302,16 @@ const reviewUI = createReviewUI(reviewRoot, {
     try {
       if (rule.scope === 'session') correctionMemory.addSessionRule(rule);
       else await correctionMemory.addPersistentRule(rule);
-      showToast('Correctieregel opgeslagen.');
+      showToast(t('toast.ruleSaved'));
     } catch (_) {
-      showToast('Kon de regel niet opslaan.');
+      showToast(t('toast.ruleSaveFailed'));
     }
   },
 });
 
 const formReviewUI = createFormReviewUI(formReviewRoot, {
   onChange: () => persistPipeline(),
-  onApprove: () => { persistPipeline(); showToast('Formulier goedgekeurd.'); },
+  onApprove: () => { persistPipeline(); showToast(t('toast.formApproved')); },
   onExport: (p) => exportFinalForm(p),
 });
 
@@ -1331,7 +1330,7 @@ const persistPipeline = debounce(() => {
     form: pipeline.form,
   }).then((updated) => {
     if (currentDetailTranscript && currentDetailTranscript.id === updated.id) currentDetailTranscript = updated;
-  }).catch(() => showToast('Could not save review changes.'));
+  }).catch(() => showToast(t('toast.reviewSaveFailed')));
 }, 600);
 
 function buildPipeline({ id = null, title = '', language, text, segments }) {
@@ -1343,19 +1342,19 @@ function buildPipeline({ id = null, title = '', language, text, segments }) {
   };
 }
 
-function loadPipelineFromEntry(t) {
+function loadPipelineFromEntry(entry) {
   pipeline = {
-    id: t.id,
-    title: t.title || '',
-    language: t.language,
-    raw: (t.raw && Array.isArray(t.raw.segments)) ? t.raw : { text: t.text || '', segments: splitIntoSegments(t.text || '', []), modelId: t.raw ? t.raw.modelId : null },
-    correction: t.correction || null,
-    annotations: t.annotations || null,
-    edits: t.edits || {},
-    ruleApplications: t.ruleApplications || [],
-    finalTranscript: t.finalTranscript || null,
-    editLog: t.editLog || null,
-    form: normalizePipelineForm(t.form),
+    id: entry.id,
+    title: entry.title || '',
+    language: entry.language,
+    raw: (entry.raw && Array.isArray(entry.raw.segments)) ? entry.raw : { text: entry.text || '', segments: splitIntoSegments(entry.text || '', []), modelId: entry.raw ? entry.raw.modelId : null },
+    correction: entry.correction || null,
+    annotations: entry.annotations || null,
+    edits: entry.edits || {},
+    ruleApplications: entry.ruleApplications || [],
+    finalTranscript: entry.finalTranscript || null,
+    editLog: entry.editLog || null,
+    form: normalizePipelineForm(entry.form),
   };
   if (pipeline.correction) {
     reviewPanel.classList.remove('hidden');
@@ -1367,7 +1366,7 @@ function loadPipelineFromEntry(t) {
   if (pipeline.form) {
     formPanel.classList.remove('hidden');
     const n = (pipeline.form.fields && pipeline.form.fields.length) || 0;
-    setFormPanelStatus('success', `Saved form loaded (${n} field(s)). Review the filled values in the right column below.`);
+    setFormPanelStatus('success', t('form.savedLoaded', { count: n }));
     formReviewUI.render(pipeline);
   } else {
     formPanel.classList.add('hidden');
@@ -1388,27 +1387,24 @@ function resetPipelineUI() {
 function updateBusyButtons() {
   reviewBtn.disabled = !currentTranscriptText || !llmSupported || isExtracting;
   detailFillFormBtn.disabled = !llmSupported || isExtracting || !currentDetailTranscript;
-  reviewUI.setProceedBusy(isExtracting, isExtracting ? 'Formulier genereren…' : 'Genereer formulier');
+  reviewUI.setProceedBusy(isExtracting, isExtracting ? t('review.generatingForm') : t('review.generateForm'));
 }
 
 function handleLlmError(err) {
   const msg = err && err.message ? err.message : String(err || 'unknown error');
-  let statusMsg = 'Local assistant error: ' + msg;
+  let statusMsg = t('llm.error', { error: msg });
   if (/no webgpu adapter|webgpu is not available/i.test(msg)) {
-    statusMsg =
-      'Local assistant unavailable: no working WebGPU GPU adapter. ' +
-      'Fully restart the browser (especially after a prior GPU crash), use Chrome or Edge, update graphics drivers, ' +
-      'and check chrome://gpu. Transcription still works.';
+    statusMsg = t('llm.unavailable');
     llmSupported = false;
     llmUnavailableReason = statusMsg;
     updateBusyButtons();
   } else if (/memory|allocat|device.*lost|device.*hung|dxgi/i.test(msg)) {
-    statusMsg += ' — your GPU may not have enough memory, or the GPU reset after a hang. Close other tabs, restart the browser, then try again.';
+    statusMsg += t('llm.memoryHint');
   } else if (/fetch|network|download/i.test(msg)) {
-    statusMsg += ' — the model download may have been interrupted. Check your connection and try again.';
+    statusMsg += t('llm.networkHint');
   }
   setLlmProgress(statusMsg);
-  showToast('AI-stap mislukt: ' + msg);
+  showToast(t('toast.aiStepFailed', { error: msg }));
 }
 
 function dedupeProtected(list) {
@@ -1426,13 +1422,13 @@ function dedupeProtected(list) {
 // Step 2-3: local rules -> LLM correction -> uncertainty annotation -> review.
 async function runCorrection() {
   if (!pipeline || isExtracting) return;
-  if (!llmSupported) { showToast('Form/correction needs WebGPU (use a recent Chrome or Edge).'); return; }
+  if (!llmSupported) { showToast(t('llm.needsWebgpuShort')); return; }
   isExtracting = true;
   updateBusyButtons();
   formPanel.classList.add('hidden');
   formReviewUI.clear();
-  if (!llmModelReady) setLlmProgress('Loading local assistant (first use downloads ~900 MB, then cached)…');
-  showToast('Bezig met verbeteren van de transcriptie…');
+  if (!llmModelReady) setLlmProgress(t('llm.loadingFirst'));
+  showToast(t('toast.improving'));
 
   try {
     const rules = await correctionMemory.getActiveRules({ specialty: null });
@@ -1452,14 +1448,14 @@ async function runCorrection() {
     const windowResults = [];
     for (let i = 0; i < windows.length; i++) {
       const label = windows.length > 1
-        ? `Correctie deel ${i + 1}/${windows.length}…`
-        : 'Transcriptie verbeteren…';
+        ? t('status.correctionPart', { current: i + 1, total: windows.length })
+        : t('status.improving');
       setLlmProgress(label, windows.length > 1 ? i / windows.length : undefined);
       const wr = await correctInWorker(windows[i], protectedTerms, knownTerms);
       if (!auth.isUnlocked()) return;
       windowResults.push(wr);
       if (windows.length > 1) {
-        setLlmProgress(`Correctie deel ${i + 1}/${windows.length} voltooid.`, (i + 1) / windows.length);
+        setLlmProgress(t('status.correctionPartDone', { current: i + 1, total: windows.length }), (i + 1) / windows.length);
       }
     }
 
@@ -1496,8 +1492,8 @@ async function runCorrection() {
     reviewUI.render(pipeline);
     reviewPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     persistPipeline();
-    setLlmProgress('Local assistant ready: Qwen2.5 1.5B (cached for offline use).');
-    showToast('Transcriptie verbeterd. Beoordeel de gemarkeerde passages.');
+    setLlmProgress(t('llm.ready'));
+    showToast(t('toast.improved'));
   } catch (err) {
     if (!auth.isUnlocked()) return;
     handleLlmError(err);
@@ -1511,7 +1507,7 @@ async function runCorrection() {
 async function runGenerateForm() {
   if (!pipeline || !pipeline.correction) return;
   if (isExtracting) {
-    showToast('Form generation is already in progress…', 3000);
+    showToast(t('form.inProgress'), 3000);
     return;
   }
   try {
@@ -1521,7 +1517,7 @@ async function runGenerateForm() {
     return;
   }
   const schema = buildSchema();
-  if (!schema) { showToast('Add at least one form field to the template first.', 5000); return; }
+  if (!schema) { showToast(t('form.needsField'), 5000); return; }
 
   isExtracting = true;
   updateBusyButtons();
@@ -1531,9 +1527,9 @@ async function runGenerateForm() {
   pipeline.editLog = buildEditLog(pipeline.correction.segments, pipeline.edits, pipeline.ruleApplications);
 
   formPanel.classList.remove('hidden');
-  setFormPanelStatus('loading', 'Filling the form from your reviewed transcript… This can take a minute on first use while the local AI model loads.');
-  formReviewRoot.innerHTML = '<p class="empty-state loading">Extracting form data from the reviewed transcript…</p>';
-  if (!llmModelReady) setLlmProgress('Loading local assistant…');
+  setFormPanelStatus('loading', t('form.loading'));
+  formReviewRoot.innerHTML = '<p class="empty-state loading">' + escapeHtml(t('form.extracting')) + '</p>';
+  if (!llmModelReady) setLlmProgress(t('llm.loading'));
 
   try {
     const { data, truncated } = await extractInWorker(final.text, final.segments, schema);
@@ -1548,18 +1544,18 @@ async function runGenerateForm() {
     const filledCount = data.fields.filter((f) => f.value && f.value !== 'niet vermeld').length;
     setFormPanelStatus(
       'success',
-      `Form filled (${filledCount} of ${data.fields.length} fields have values). Review the fields in the right column below. ` +
-      'Click "Toon bron" on any field to see where its value came from in the transcript.',
+      t('form.filledSuccess', { filled: filledCount, total: data.fields.length }),
     );
     formPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     persistPipeline();
-    if (truncated) showToast('Note: the transcript was very long and was truncated for extraction.', 6000);
-    setLlmProgress('Local assistant ready: Qwen2.5 1.5B (cached for offline use).');
-    showToast('Form filled — scroll to Step 3 below and review each field.', 7000);
+    if (truncated) showToast(t('form.truncated'), 6000);
+    setLlmProgress(t('llm.ready'));
+    showToast(t('form.filledToast'), 7000);
   } catch (err) {
     if (!auth.isUnlocked()) return;
-    setFormPanelStatus('error', 'Form filling failed: ' + (err.message || 'unknown error') + '. See the message below, then try again.');
-    formReviewRoot.innerHTML = '<p class="empty-state error">Form filling failed: ' + escapeHtml(err.message || 'unknown error') + '</p>';
+    const errMsg = err.message || 'unknown error';
+    setFormPanelStatus('error', t('form.fillFailed', { error: errMsg }));
+    formReviewRoot.innerHTML = '<p class="empty-state error">' + escapeHtml(t('form.fillFailedShort', { error: errMsg })) + '</p>';
     handleLlmError(err);
   } finally {
     isExtracting = false;
@@ -1572,7 +1568,7 @@ function formAsTextStructured(form) {
   const normalized = normalizePipelineForm(form);
   if (!normalized || !normalized.fields.length) return '';
   return normalized.fields
-    .map((f) => `${f.field_name}:\n${f.value || '—'}${f.needs_review ? '  [controleer]' : ''}`)
+    .map((f) => `${f.field_name}:\n${f.value || '—'}${f.needs_review ? t('export.needsReview') : ''}`)
     .join('\n\n');
 }
 
@@ -1580,15 +1576,15 @@ function buildTranscriptExportText(p, fallbackText) {
   if (!p) return fallbackText || '';
   const parts = [];
   const raw = (p.raw && p.raw.text) || fallbackText || '';
-  parts.push('===== Ruwe transcriptie (Whisper) =====\n' + raw);
+  parts.push(t('export.rawHeader') + '\n' + raw);
   if (p.finalTranscript && p.finalTranscript.text) {
-    parts.push('===== Definitieve gecontroleerde transcriptie =====\n' + p.finalTranscript.text);
+    parts.push(t('export.finalHeader') + '\n' + p.finalTranscript.text);
   } else if (p.correction && p.correction.correctedText) {
-    parts.push('===== AI-gecorrigeerde transcriptie =====\n' + p.correction.correctedText);
+    parts.push(t('export.correctedHeader') + '\n' + p.correction.correctedText);
   }
   const formText = formAsTextStructured(p.form);
   if (formText) {
-    parts.push('===== Medisch formulier =====\n' + formText);
+    parts.push(t('export.formHeader') + '\n' + formText);
   }
   return parts.join('\n\n');
 }
@@ -1596,7 +1592,7 @@ function buildTranscriptExportText(p, fallbackText) {
 // --- Entry points: start review from the current or a saved transcript ---
 reviewBtn.addEventListener('click', () => {
   const text = currentTranscriptText.trim();
-  if (!text) { showToast('Transcript is empty.'); return; }
+  if (!text) { showToast(t('toast.transcriptEmpty')); return; }
   pipeline = buildPipeline({
     id: null,
     title: '',
@@ -1609,13 +1605,13 @@ reviewBtn.addEventListener('click', () => {
 
 detailFillFormBtn.addEventListener('click', () => {
   if (!currentDetailTranscript) return;
-  const t = currentDetailTranscript;
-  if (pipeline && pipeline.id === t.id && pipeline.correction) {
+  const entry = currentDetailTranscript;
+  if (pipeline && pipeline.id === entry.id && pipeline.correction) {
     // Already loaded with a correction: re-run to refresh.
     runCorrection();
     return;
   }
-  loadPipelineFromEntry(t);
+  loadPipelineFromEntry(entry);
   if (!pipeline.correction) runCorrection();
 });
 
@@ -1627,21 +1623,19 @@ function initLlmSupport() {
     detailFillFormBtn.title = '';
     return;
   }
-  const reason = llmUnavailableReason ||
-    'Transcript correction and form filling need a working WebGPU GPU adapter. Use a recent Chrome or Edge.';
+  const reason = llmUnavailableReason || t('llm.needsWebgpu');
   reviewBtn.title = reason;
   detailFillFormBtn.title = reason;
-  llmStatus.textContent = reason + ' Transcription still works normally.';
+  llmStatus.textContent = reason + t('llm.stillWorks');
 }
 
 async function probeWebGpu() {
-  llmStatus.textContent = 'Checking WebGPU for the local assistant…';
+  llmStatus.textContent = t('llm.checking');
   const { available, reason } = await probeWebGpuAvailable();
   llmSupported = available;
   llmUnavailableReason = reason || '';
   if (llmSupported) {
-    llmStatus.textContent =
-      'The local assistant (Qwen2.5 1.5B, ~900 MB) downloads on first use, then is cached for offline use. Runs locally via WebGPU.';
+    llmStatus.textContent = t('llm.status');
   } else {
     initLlmSupport();
   }
@@ -1706,7 +1700,7 @@ function cleanupRecordingUI() {
   recordingChunkIndex = 0;
   if (recordingTimerInterval) { clearInterval(recordingTimerInterval); recordingTimerInterval = null; }
   if (recordingLimitInterval) { clearInterval(recordingLimitInterval); recordingLimitInterval = null; }
-  recordBtn.textContent = 'Record';
+  recordBtn.textContent = t('transcribe.record');
   recordBtn.classList.remove('stop');
   recordingIndicator.classList.remove('visible');
   pauseRecordBtn.style.display = 'none';
@@ -1720,7 +1714,7 @@ function handleLocked() {
   currentChunks = [];
   currentRecordingSessionId = null;
   currentDraftId = null;
-  resultEl.textContent = 'Record or upload audio to transcribe.';
+  resultEl.textContent = t('transcribe.empty');
   resultEl.className = '';
   saveBtn.disabled = true;
   downloadBtn.disabled = true;
@@ -1742,10 +1736,10 @@ function handleLocked() {
   exitEditMode();
 
   // Saved list, pipeline (review + form), local session rules, and template
-  savedListEl.innerHTML = '<li class="empty-state">Locked.</li>';
+  savedListEl.innerHTML = '<li class="empty-state">' + escapeHtml(t('saved.locked')) + '</li>';
   resetPipelineUI();
   correctionMemory.clearSessionRules();
-  templateFields = DEFAULT_TEMPLATE.map(f => ({ ...f }));
+  templateFields = getDefaultTemplate().map(f => ({ ...f }));
   templateFieldsEl.innerHTML = '';
 
   // Back to the login screen
@@ -1761,7 +1755,7 @@ async function onUnlocked() {
   lockBtn.style.display = '';
   try {
     const migrated = await db.migrateLegacyData();
-    if (migrated > 0) showToast(`Encrypted ${migrated} existing item(s) under your account.`);
+    if (migrated > 0) showToast(t('toast.migrated', { count: migrated }));
   } catch (e) {
     console.warn('Legacy data migration failed', e);
   }
@@ -1778,11 +1772,11 @@ loginForm.addEventListener('submit', async (e) => {
   if (!username.trim() || !password) return;
   loginSubmitBtn.disabled = true;
   loginError.textContent = '';
-  loginSubmitBtn.textContent = 'Checking…';
+  loginSubmitBtn.textContent = t('login.checking');
   try {
     const ok = await auth.login(username, password);
     if (!ok) {
-      loginError.textContent = 'Access denied: invalid username or password.';
+      loginError.textContent = t('login.denied');
       loginPassword.value = '';
       loginPassword.focus();
       return;
@@ -1790,10 +1784,10 @@ loginForm.addEventListener('submit', async (e) => {
     loginPassword.value = '';
     await onUnlocked();
   } catch (err) {
-    loginError.textContent = 'Login failed: ' + (err.message || 'unknown error');
+    loginError.textContent = t('login.failed', { error: err.message || 'unknown error' });
   } finally {
     loginSubmitBtn.disabled = false;
-    loginSubmitBtn.textContent = 'Unlock';
+    loginSubmitBtn.textContent = t('login.unlock');
   }
 });
 
@@ -1801,7 +1795,47 @@ lockBtn.addEventListener('click', () => auth.lock());
 
 auth.configureAutoLock({ onPrepareLock: prepareForLock, onLock: handleLocked, isBusy: isAppBusy });
 
+function refreshDynamicUI() {
+  applyStatic(document);
+  if (mediaRecorder && (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused')) {
+    recordBtn.textContent = t('transcribe.stop');
+  } else {
+    recordBtn.textContent = t('transcribe.record');
+  }
+  if (mediaRecorder && mediaRecorder.state === 'paused') {
+    pauseRecordBtn.textContent = t('transcribe.resume');
+  } else if (pauseRecordBtn.style.display !== 'none') {
+    pauseRecordBtn.textContent = t('transcribe.pause');
+  }
+  if (!currentTranscriptText && !isTranscribing && resultEl.className !== 'loading' && resultEl.className !== 'error') {
+    resultEl.textContent = t('transcribe.empty');
+  }
+  if (pendingRecovery) showRecoveryBanner(pendingRecovery);
+  renderTemplateEditor();
+  if (auth.isUnlocked()) loadSavedList();
+  if (pipeline?.correction) reviewUI.render(pipeline);
+  else if (!pipeline) reviewUI.clear();
+  if (pipeline?.form) formReviewUI.render(pipeline);
+  else if (!pipeline?.form && !formReviewRoot.querySelector('.tform-field')) {
+    const empty = document.getElementById('formReviewEmpty');
+    if (empty) empty.textContent = t('form.empty');
+    else formReviewRoot.innerHTML = '<p class="empty-state">' + escapeHtml(t('form.empty')) + '</p>';
+  }
+  if (!modelReady && !pendingLoad) {
+    modelStatus.textContent = t('engine.notLoaded');
+  }
+  initLlmSupport();
+  if (llmSupported && !isExtracting) llmStatus.textContent = llmModelReady ? t('llm.ready') : t('llm.status');
+  updateBusyButtons();
+}
+
+langToggleBtn?.addEventListener('click', () => toggleLang());
+onLangChange(() => refreshDynamicUI());
+
 // --- Init ---
+applyStatic(document);
+document.documentElement.lang = getLang();
+if (!modelReady) modelStatus.textContent = t('engine.notLoaded');
 if ([...modelSelect.options].some(o => o.value === DEFAULT_MODEL)) {
   modelSelect.value = DEFAULT_MODEL;
 }

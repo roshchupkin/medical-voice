@@ -12,6 +12,7 @@
 // and the traceable form).
 
 import { resolveSegmentChain } from './final-transcript.js';
+import { t, onLangChange } from './i18n.js';
 
 function el(tag, className, text) {
   const e = document.createElement(tag);
@@ -20,8 +21,13 @@ function el(tag, className, text) {
   return e;
 }
 
-const CONF_LABEL = { high: 'hoog', medium: 'middel', low: 'laag' };
-const COLOR_LABEL = { green: 'groen', yellow: 'geel', red: 'rood' };
+function confLabel(c) {
+  return t(c === 'high' ? 'form.confHigh' : c === 'medium' ? 'form.confMedium' : 'form.confLow') || c;
+}
+
+function colorLabel(color) {
+  return t(color === 'green' ? 'form.colorGreen' : color === 'yellow' ? 'form.colorYellow' : 'form.colorRed') || color;
+}
 
 // Normalises stored form data into the traceable shape. Older saves used a flat
 // { "Field name": "value" } object without fields[] or source metadata.
@@ -50,7 +56,7 @@ export function normalizePipelineForm(form) {
       warning: null,
     })),
     missingFields: [],
-    overallWarnings: ['Opgeslagen in oud formaat — geen brontraceerbaarheid. Genereer het formulier opnieuw voor bronnen per veld.'],
+    overallWarnings: [t('form.legacyWarning')],
     approvedAt: form.approvedAt || null,
   };
 }
@@ -68,8 +74,10 @@ export function createFormReviewUI(root, callbacks = {}) {
   const fieldsWrap = el('div', 'form-fields-wrap');
   const missingWrap = el('div', 'form-missing');
   const actions = el('div', 'row form-actions');
-  const approveBtn = el('button', 'primary', 'Formulier goedkeuren'); approveBtn.type = 'button';
-  const exportBtn = el('button', '', 'Exporteer .json'); exportBtn.type = 'button';
+  const approveBtn = el('button', 'primary', t('form.approve'));
+  approveBtn.type = 'button';
+  const exportBtn = el('button', '', t('form.exportJson'));
+  exportBtn.type = 'button';
   const statusEl = el('span', 'form-approval-status', '');
   actions.append(approveBtn, exportBtn, statusEl);
   root.append(warnings, fieldsWrap, missingWrap, actions);
@@ -86,14 +94,19 @@ export function createFormReviewUI(root, callbacks = {}) {
     else exportFinalForm(pipeline);
   });
 
+  function refreshActionLabels() {
+    approveBtn.textContent = t('form.approve');
+    exportBtn.textContent = t('form.exportJson');
+  }
+
   function renderWarnings() {
     warnings.innerHTML = '';
     if (!pipeline || !pipeline.form) return;
     const list = [...(pipeline.form.overallWarnings || [])];
     const needsReview = formFields(pipeline.form).filter((f) => f.needs_review).length;
-    if (needsReview) list.unshift(`${needsReview} veld(en) gemarkeerd voor controle.`);
+    if (needsReview) list.unshift(t('form.fieldsNeedReview', { count: needsReview }));
     if (!list.length) return;
-    warnings.append(el('strong', '', 'Waarschuwingen:'));
+    warnings.append(el('strong', '', t('form.warnings')));
     const ul = el('ul');
     for (const w of list) ul.append(el('li', '', w));
     warnings.append(ul);
@@ -108,9 +121,9 @@ export function createFormReviewUI(root, callbacks = {}) {
       const labelRow = el('div', 'tform-label-row');
       labelRow.append(el('label', '', field.field_name));
       const badges = el('span', 'tform-badges');
-      badges.append(el('span', `conf-badge conf-${field.confidence}`, 'zekerheid: ' + (CONF_LABEL[field.confidence] || field.confidence)));
-      if (field.was_inferred) badges.append(el('span', 'tform-flag inferred', 'afgeleid'));
-      if (field.needs_review) badges.append(el('span', 'tform-flag review', 'controleer'));
+      badges.append(el('span', `conf-badge conf-${field.confidence}`, t('form.confidence') + confLabel(field.confidence)));
+      if (field.was_inferred) badges.append(el('span', 'tform-flag inferred', t('form.inferred')));
+      if (field.needs_review) badges.append(el('span', 'tform-flag review', t('form.needsReview')));
       labelRow.append(badges);
       wrap.append(labelRow);
 
@@ -124,12 +137,14 @@ export function createFormReviewUI(root, callbacks = {}) {
 
       if (field.warning) wrap.append(el('p', 'tform-warning', field.warning));
 
-      const srcBtn = el('button', 'button-as-link', 'Toon bron'); srcBtn.type = 'button';
+      const srcBtn = el('button', 'button-as-link', t('form.showSource'));
+      srcBtn.type = 'button';
       const srcPanel = el('div', 'tform-source hidden');
       srcBtn.addEventListener('click', () => {
         const isHidden = srcPanel.classList.toggle('hidden');
-        srcBtn.textContent = isHidden ? 'Toon bron' : 'Verberg bron';
-        if (!isHidden && !srcPanel.dataset.built) {
+        srcBtn.textContent = isHidden ? t('form.showSource') : t('form.hideSource');
+        if (!isHidden) {
+          srcPanel.dataset.built = '';
           buildSourcePanel(srcPanel, field);
           srcPanel.dataset.built = '1';
         }
@@ -141,10 +156,10 @@ export function createFormReviewUI(root, callbacks = {}) {
 
   function buildSourcePanel(panel, field) {
     panel.innerHTML = '';
-    const stated = field.was_inferred ? 'Afgeleid (niet letterlijk genoemd)' : 'Letterlijk vermeld';
-    panel.append(traceRow('Status', stated));
-    panel.append(traceRow('Zekerheid', CONF_LABEL[field.confidence] || field.confidence));
-    panel.append(traceRow('Bronzin (AI)', field.source_sentence || '—'));
+    const stated = field.was_inferred ? t('form.sourceInferred') : t('form.sourceStated');
+    panel.append(traceRow(t('form.sourceStatus'), stated));
+    panel.append(traceRow(t('form.sourceConfidence'), confLabel(field.confidence)));
+    panel.append(traceRow(t('form.sourceSentence'), field.source_sentence || '—'));
 
     const chain = field.source_segment_id
       ? resolveSegmentChain(field.source_segment_id, {
@@ -157,14 +172,14 @@ export function createFormReviewUI(root, callbacks = {}) {
       : null;
 
     if (chain) {
-      panel.append(traceRow('Segment', field.source_segment_id));
-      panel.append(traceRow('Ruwe Whisper-tekst', chain.raw || '—'));
-      panel.append(traceRow('AI-correctie', chain.corrected || '—'));
-      panel.append(traceRow('Definitieve tekst', chain.final || '—'));
-      panel.append(traceRow('Bewerkt door clinicus', chain.edited ? 'ja' : 'nee'));
-      panel.append(traceRow('Eerdere markering', chain.color ? COLOR_LABEL[chain.color] : '—'));
+      panel.append(traceRow(t('form.sourceSegment'), field.source_segment_id));
+      panel.append(traceRow(t('form.sourceRaw'), chain.raw || '—'));
+      panel.append(traceRow(t('form.sourceAi'), chain.corrected || '—'));
+      panel.append(traceRow(t('form.sourceFinal'), chain.final || '—'));
+      panel.append(traceRow(t('form.sourceEdited'), chain.edited ? t('form.yes') : t('form.no')));
+      panel.append(traceRow(t('form.sourcePriorFlag'), chain.color ? colorLabel(chain.color) : '—'));
     } else {
-      panel.append(el('p', 'hint', 'Geen specifiek bronsegment gekoppeld. Controleer de bronzin hierboven tegen de transcriptie.'));
+      panel.append(el('p', 'hint', t('form.sourceNoSegment')));
     }
   }
 
@@ -180,7 +195,7 @@ export function createFormReviewUI(root, callbacks = {}) {
     if (!pipeline || !pipeline.form) return;
     const list = pipeline.form.missingFields || [];
     if (!list.length) return;
-    missingWrap.append(el('strong', '', 'Ontbrekende velden:'));
+    missingWrap.append(el('strong', '', t('form.missingFields')));
     const ul = el('ul');
     for (const m of list) ul.append(el('li', '', `${m.field_name}: ${m.reason}`));
     missingWrap.append(ul);
@@ -189,14 +204,27 @@ export function createFormReviewUI(root, callbacks = {}) {
   function renderStatus() {
     if (!pipeline || !pipeline.form) return;
     if (pipeline.form.approvedAt) {
-      statusEl.textContent = 'Goedgekeurd op ' + new Date(pipeline.form.approvedAt).toLocaleString();
+      statusEl.textContent = t('form.approvedAt', { date: new Date(pipeline.form.approvedAt).toLocaleString() });
       statusEl.classList.add('approved');
     } else {
       const n = formFields(pipeline.form).filter((f) => f.needs_review).length;
-      statusEl.textContent = n ? `Nog niet goedgekeurd — ${n} veld(en) te controleren.` : 'Nog niet goedgekeurd.';
+      statusEl.textContent = n ? t('form.notApprovedReview', { count: n }) : t('form.notApproved');
       statusEl.classList.remove('approved');
     }
   }
+
+  function fullRender() {
+    refreshActionLabels();
+    renderWarnings();
+    renderFields();
+    renderMissing();
+    renderStatus();
+  }
+
+  onLangChange(() => {
+    if (pipeline) fullRender();
+    else refreshActionLabels();
+  });
 
   return {
     render(p) {
@@ -204,10 +232,7 @@ export function createFormReviewUI(root, callbacks = {}) {
       if (!pipeline || !pipeline.form) { this.clear(); return; }
       pipeline.form = normalizePipelineForm(pipeline.form);
       if (!pipeline.form) { this.clear(); return; }
-      renderWarnings();
-      renderFields();
-      renderMissing();
-      renderStatus();
+      fullRender();
     },
     clear() {
       pipeline = null;
@@ -215,6 +240,7 @@ export function createFormReviewUI(root, callbacks = {}) {
       fieldsWrap.innerHTML = '';
       missingWrap.innerHTML = '';
       statusEl.textContent = '';
+      refreshActionLabels();
     },
   };
 }
@@ -223,7 +249,7 @@ export function createFormReviewUI(root, callbacks = {}) {
 export function exportFinalForm(pipeline, filename) {
   const out = {
     exportedAt: new Date().toISOString(),
-    title: pipeline.title || 'Untitled',
+    title: pipeline.title || t('saved.untitled'),
     language: pipeline.language || null,
     rawTranscript: pipeline.raw ? pipeline.raw.text : '',
     correctedTranscript: pipeline.correction ? pipeline.correction.correctedText : '',

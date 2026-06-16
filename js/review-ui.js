@@ -11,6 +11,7 @@
 // proceed to form filling.
 
 import { summarizeAnnotations } from './uncertainty.js';
+import { t, onLangChange } from './i18n.js';
 
 function el(tag, className, text) {
   const e = document.createElement(tag);
@@ -19,7 +20,9 @@ function el(tag, className, text) {
   return e;
 }
 
-const COLOR_LABEL = { green: 'Betrouwbaar', yellow: 'Controleer', red: 'Hoog risico' };
+function colorLabel(color) {
+  return t(color === 'green' ? 'review.colorGreen' : color === 'yellow' ? 'review.colorYellow' : 'review.colorRed');
+}
 
 export function createReviewUI(root, callbacks = {}) {
   const { onChange, onProceed, onAddRule, onNotify } = callbacks;
@@ -34,30 +37,33 @@ export function createReviewUI(root, callbacks = {}) {
   const warnings = el('div', 'review-warnings');
 
   const toolbar = el('div', 'review-toolbar');
-  const toggleBtn = el('button', '', 'Toon ruwe transcriptie');
+  const toggleBtn = el('button', '', t('review.showRaw'));
   toggleBtn.type = 'button';
   const legend = el('div', 'review-legend');
-  legend.innerHTML =
-    '<span class="seg-chip seg-green">groen: betrouwbaar</span>' +
-    '<span class="seg-chip seg-yellow">geel: controleer</span>' +
-    '<span class="seg-chip seg-red">rood: hoog risico</span>';
-  toolbar.append(toggleBtn, legend);
-
-  const transcriptBox = el('div', 'review-transcript');
-  const editorPanel = el('div', 'review-editor hidden');
-  const ruleBox = buildRuleBox();
   const proceedRow = el('div', 'review-proceed-row');
-  const proceedBtn = el('button', 'primary', 'Genereer formulier');
+  const proceedBtn = el('button', 'primary', t('review.generateForm'));
   proceedBtn.type = 'button';
   const proceedHint = el('p', 'hint', '');
   proceedRow.append(proceedBtn, proceedHint);
 
+  const transcriptBox = el('div', 'review-transcript');
+  const editorPanel = el('div', 'review-editor hidden');
+  const ruleBox = buildRuleBox();
   root.append(banner, warnings, toolbar, transcriptBox, editorPanel, ruleBox.wrap, proceedRow);
+
+  function renderLegend() {
+    legend.innerHTML =
+      `<span class="seg-chip seg-green">${t('review.legendGreen')}</span>` +
+      `<span class="seg-chip seg-yellow">${t('review.legendYellow')}</span>` +
+      `<span class="seg-chip seg-red">${t('review.legendRed')}</span>`;
+  }
+  toolbar.append(toggleBtn, legend);
+  renderLegend();
 
   toggleBtn.addEventListener('click', () => {
     if (!pipeline || !pipeline.correction) return;
     showRaw = !showRaw;
-    toggleBtn.textContent = showRaw ? 'Toon gecorrigeerde transcriptie' : 'Toon ruwe transcriptie';
+    toggleBtn.textContent = showRaw ? t('review.showCorrected') : t('review.showRaw');
     renderTranscript();
   });
 
@@ -66,7 +72,7 @@ export function createReviewUI(root, callbacks = {}) {
     if (proceedBtn.disabled) return;
     const summary = summarizeAnnotations(pipeline.annotations);
     if (summary.redOutstanding > 0) {
-      const msg = `Review all ${summary.redOutstanding} red passage(s) before generating the form. Click each red highlight and confirm or edit it.`;
+      const msg = t('review.redGate', { count: summary.redOutstanding });
       proceedHint.textContent = msg;
       proceedHint.classList.add('error');
       if (onNotify) onNotify(msg, 6000);
@@ -77,19 +83,22 @@ export function createReviewUI(root, callbacks = {}) {
 
   function buildRuleBox() {
     const wrap = el('details', 'review-rule-box');
-    const summary = el('summary', '', 'Correctieregel toevoegen (lokaal)');
+    const summary = el('summary', '', t('review.addRule'));
     const rowFrom = el('div', 'rule-row');
-    const fromIn = el('input'); fromIn.placeholder = 'van (bijv. metformien)';
-    const toIn = el('input'); toIn.placeholder = 'naar (bijv. metformine)';
+    const fromIn = el('input');
+    fromIn.placeholder = t('review.ruleFrom');
+    const toIn = el('input');
+    toIn.placeholder = t('review.ruleTo');
     const modeSel = el('select');
-    [['replace', 'vervang'], ['expand', 'afkorting uitbreiden'], ['protect', 'beschermen (niet wijzigen)']]
-      .forEach(([v, t]) => { const o = el('option', '', t); o.value = v; modeSel.append(o); });
+    [['replace', 'review.ruleModeReplace'], ['expand', 'review.ruleModeExpand'], ['protect', 'review.ruleModeProtect']]
+      .forEach(([v, key]) => { const o = el('option', '', t(key)); o.value = v; modeSel.append(o); });
     const scopeSel = el('select');
-    [['session', 'deze sessie'], ['user', 'mijn account']]
-      .forEach(([v, t]) => { const o = el('option', '', t); o.value = v; scopeSel.append(o); });
-    const addBtn = el('button', '', 'Opslaan'); addBtn.type = 'button';
+    [['session', 'review.ruleScopeSession'], ['user', 'review.ruleScopeUser']]
+      .forEach(([v, key]) => { const o = el('option', '', t(key)); o.value = v; scopeSel.append(o); });
+    const addBtn = el('button', '', t('review.ruleSave'));
+    addBtn.type = 'button';
     rowFrom.append(fromIn, toIn, modeSel, scopeSel, addBtn);
-    const note = el('p', 'hint', 'Vervang/afkorting wordt vóór de AI-correctie toegepast. Beschermde termen worden nooit gewijzigd.');
+    const note = el('p', 'hint', t('review.ruleHint'));
     wrap.append(summary, rowFrom, note);
 
     addBtn.addEventListener('click', async () => {
@@ -102,9 +111,23 @@ export function createReviewUI(root, callbacks = {}) {
       if (!rule.from || (rule.mode !== 'protect' && !rule.to)) return;
       if (onAddRule) await onAddRule(rule);
       fromIn.value = ''; toIn.value = '';
-      note.textContent = 'Regel opgeslagen. Klik op "Verbeter opnieuw" om hem toe te passen.';
+      note.textContent = t('review.ruleSaved');
     });
-    return { wrap };
+    return { wrap, summary, fromIn, toIn, modeSel, scopeSel, addBtn, note };
+  }
+
+  function refreshRuleBoxLabels() {
+    ruleBox.summary.textContent = t('review.addRule');
+    ruleBox.fromIn.placeholder = t('review.ruleFrom');
+    ruleBox.toIn.placeholder = t('review.ruleTo');
+    ruleBox.modeSel.innerHTML = '';
+    [['replace', 'review.ruleModeReplace'], ['expand', 'review.ruleModeExpand'], ['protect', 'review.ruleModeProtect']]
+      .forEach(([v, key]) => { const o = el('option', '', t(key)); o.value = v; ruleBox.modeSel.append(o); });
+    ruleBox.scopeSel.innerHTML = '';
+    [['session', 'review.ruleScopeSession'], ['user', 'review.ruleScopeUser']]
+      .forEach(([v, key]) => { const o = el('option', '', t(key)); o.value = v; ruleBox.scopeSel.append(o); });
+    ruleBox.addBtn.textContent = t('review.ruleSave');
+    ruleBox.note.textContent = t('review.ruleHint');
   }
 
   // --- Rendering ---
@@ -121,13 +144,16 @@ export function createReviewUI(root, callbacks = {}) {
   function renderBanner() {
     if (!pipeline) return;
     const s = summarizeAnnotations(pipeline.annotations);
-    banner.innerHTML =
-      `Deze transcriptie bevat <strong>${s.green}</strong> groene correctie(s), ` +
-      `<strong>${s.yellow}</strong> gele onzekere passage(s) en ` +
-      `<strong class="${s.red ? 'banner-red' : ''}">${s.red}</strong> rode hoog-risico passage(s). ` +
-      (s.redOutstanding > 0
-        ? `Beoordeel alle rode passages voordat u het formulier genereert (${s.redOutstanding} resterend).`
-        : 'Alle rode passages zijn beoordeeld.');
+    const footer = s.redOutstanding > 0
+      ? t('review.bannerRedPending', { count: s.redOutstanding })
+      : t('review.bannerRedDone');
+    banner.innerHTML = t('review.banner', {
+      green: s.green,
+      yellow: s.yellow,
+      red: s.red,
+      redClass: s.red ? 'banner-red' : '',
+      footer,
+    });
   }
 
   function renderWarnings() {
@@ -137,14 +163,14 @@ export function createReviewUI(root, callbacks = {}) {
     if (!list.length && !conflicts.length) { warnings.innerHTML = ''; return; }
     warnings.innerHTML = '';
     if (list.length) {
-      const head = el('strong', '', 'Waarschuwingen:');
+      const head = el('strong', '', t('review.warnings'));
       warnings.append(head);
       const ul = el('ul');
       for (const w of list) ul.append(el('li', '', w));
       warnings.append(ul);
     }
     if (conflicts.length) {
-      const head = el('strong', '', 'Grenzen tussen correctiedelen:');
+      const head = el('strong', '', t('review.boundaryConflicts'));
       warnings.append(head);
       const ul = el('ul');
       for (const c of conflicts) {
@@ -178,7 +204,7 @@ export function createReviewUI(root, callbacks = {}) {
       const span = el('span', `seg seg-${color}` + (selectedId === seg.segment_id ? ' seg-selected' : ''), text + ' ');
       span.dataset.id = seg.segment_id;
       if (ann && ann.confirmed) span.classList.add('seg-confirmed');
-      span.title = ann ? `${COLOR_LABEL[color]} — ${ann.triggers.join(', ') || 'geen specifieke triggers'}` : '';
+      span.title = ann ? `${colorLabel(color)} — ${ann.triggers.join(', ') || t('review.noTriggers')}` : '';
       span.addEventListener('click', () => selectSegment(seg.segment_id));
       transcriptBox.append(span);
     }
@@ -203,41 +229,46 @@ export function createReviewUI(root, callbacks = {}) {
     editorPanel.innerHTML = '';
 
     const head = el('div', 'editor-head');
-    head.append(el('span', `seg-chip seg-${ann ? ann.color : 'green'}`, ann ? COLOR_LABEL[ann.color] : ''));
+    head.append(el('span', `seg-chip seg-${ann ? ann.color : 'green'}`, ann ? colorLabel(ann.color) : ''));
     if (ann && ann.triggers.length) head.append(el('span', 'editor-triggers', ann.triggers.join(', ')));
-    const closeBtn = el('button', '', 'Sluiten'); closeBtn.type = 'button';
+    const closeBtn = el('button', '', t('review.close'));
+    closeBtn.type = 'button';
     closeBtn.addEventListener('click', () => { selectedId = null; renderTranscript(); renderEditor(); });
     head.append(closeBtn);
     editorPanel.append(head);
 
-    if (seg.reason) editorPanel.append(el('p', 'editor-reason', 'Reden: ' + seg.reason));
+    if (seg.reason) editorPanel.append(el('p', 'editor-reason', t('review.reason') + seg.reason));
 
     const cmp = el('div', 'editor-compare');
     const rawCol = el('div', 'editor-col');
-    rawCol.append(el('div', 'editor-col-label', 'Ruwe transcriptie (Whisper)'));
+    rawCol.append(el('div', 'editor-col-label', t('review.rawCol')));
     rawCol.append(el('div', 'editor-col-text', raw ? raw.text : seg.original_text));
     const corrCol = el('div', 'editor-col');
-    corrCol.append(el('div', 'editor-col-label', 'AI-correctie'));
+    corrCol.append(el('div', 'editor-col-label', t('review.aiCol')));
     corrCol.append(el('div', 'editor-col-text', seg.corrected_text));
     cmp.append(rawCol, corrCol);
     editorPanel.append(cmp);
 
-    editorPanel.append(el('label', 'editor-label', 'Definitieve tekst'));
+    editorPanel.append(el('label', 'editor-label', t('review.finalLabel')));
     const ta = el('textarea', 'editor-textarea');
     ta.value = (edit.action === 'reject') ? seg.original_text
       : (typeof edit.after === 'string' && edit.after.length ? edit.after : seg.corrected_text);
     editorPanel.append(ta);
 
     const noteIn = el('input', 'editor-note');
-    noteIn.placeholder = 'Notitie (optioneel)';
+    noteIn.placeholder = t('review.notePlaceholder');
     noteIn.value = edit.note || '';
     editorPanel.append(noteIn);
 
     const actions = el('div', 'editor-actions');
-    const acceptBtn = el('button', 'primary', 'Accepteer AI-correctie'); acceptBtn.type = 'button';
-    const rejectBtn = el('button', '', 'Verwerp (gebruik ruwe tekst)'); rejectBtn.type = 'button';
-    const saveBtn = el('button', 'primary', 'Sla bewerking op'); saveBtn.type = 'button';
-    const confirmBtn = el('button', '', 'Markeer als gecontroleerd'); confirmBtn.type = 'button';
+    const acceptBtn = el('button', 'primary', t('review.acceptAi'));
+    acceptBtn.type = 'button';
+    const rejectBtn = el('button', '', t('review.rejectRaw'));
+    rejectBtn.type = 'button';
+    const saveBtn = el('button', 'primary', t('review.saveEdit'));
+    saveBtn.type = 'button';
+    const confirmBtn = el('button', '', t('review.markReviewed'));
+    confirmBtn.type = 'button';
     actions.append(acceptBtn, rejectBtn, saveBtn, confirmBtn);
     editorPanel.append(actions);
 
@@ -265,26 +296,44 @@ export function createReviewUI(root, callbacks = {}) {
     if (!pipeline) return;
     const s = summarizeAnnotations(pipeline.annotations);
     if (s.redOutstanding > 0) {
-      proceedHint.textContent = `${s.redOutstanding} rode passage(s) nog te beoordelen.`;
+      proceedHint.textContent = t('review.redOutstanding', { count: s.redOutstanding });
       proceedHint.classList.remove('error');
     } else {
-      proceedHint.textContent = 'Alle rode passages beoordeeld — u kunt het formulier genereren.';
+      proceedHint.textContent = t('review.allRedReviewed');
       proceedHint.classList.remove('error');
     }
   }
+
+  function fullRender() {
+    if (!pipeline) return;
+    showRaw = false;
+    toggleBtn.textContent = t('review.showRaw');
+    proceedBtn.textContent = t('review.generateForm');
+    renderLegend();
+    refreshRuleBoxLabels();
+    renderBanner();
+    renderWarnings();
+    renderTranscript();
+    renderEditor();
+    updateProceedState();
+  }
+
+  onLangChange(() => {
+    if (pipeline) fullRender();
+    else {
+      toggleBtn.textContent = t('review.showRaw');
+      proceedBtn.textContent = t('review.generateForm');
+      renderLegend();
+      refreshRuleBoxLabels();
+    }
+  });
 
   return {
     render(p) {
       pipeline = p;
       if (!pipeline.edits) pipeline.edits = {};
       selectedId = null;
-      showRaw = false;
-      toggleBtn.textContent = 'Toon ruwe transcriptie';
-      renderBanner();
-      renderWarnings();
-      renderTranscript();
-      renderEditor();
-      updateProceedState();
+      fullRender();
     },
     clear() {
       pipeline = null;
@@ -295,12 +344,13 @@ export function createReviewUI(root, callbacks = {}) {
       editorPanel.classList.add('hidden');
       proceedHint.textContent = '';
       proceedBtn.disabled = false;
-      proceedBtn.textContent = 'Genereer formulier';
+      proceedBtn.textContent = t('review.generateForm');
+      toggleBtn.textContent = t('review.showRaw');
     },
     setProceedBusy(busy, label) {
       proceedBtn.disabled = !!busy;
       if (label) proceedBtn.textContent = label;
-      else if (!busy) proceedBtn.textContent = 'Genereer formulier';
+      else if (!busy) proceedBtn.textContent = t('review.generateForm');
     },
   };
 }

@@ -13,6 +13,7 @@
 //   - The clinician can always override the model.
 
 import { summarizeAnnotations } from './uncertainty.js';
+import { t } from './i18n.js';
 
 export const NOT_MENTIONED = 'niet vermeld';
 
@@ -30,7 +31,7 @@ export function isFormGenerationAllowed(annotations) {
 export function assertFormGenerationAllowed(annotations) {
   const { allowed, redOutstanding } = isFormGenerationAllowed(annotations);
   if (!allowed) {
-    throw new Error(`Er zijn nog ${redOutstanding} rode passage(s) die eerst beoordeeld moeten worden.`);
+    throw new Error(t('review.redGate', { count: redOutstanding }));
   }
 }
 

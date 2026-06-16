@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="nl">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Whisper – Private In-Browser Transcription</title>
+  <title>Whisper – Privé transcriptie in de browser</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
@@ -432,7 +432,8 @@
       align-items: flex-start;
       gap: 1rem;
     }
-    #lockBtn { flex-shrink: 0; }
+    #lockBtn, #langToggleBtn { flex-shrink: 0; }
+    .header-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
     /* Login overlay */
     .login-overlay {
       position: fixed;
@@ -481,105 +482,108 @@
     <header>
       <div class="header-row">
         <div>
-          <h1>Whisper</h1>
-          <p class="subtitle">Fully private transcription: audio and text never leave this browser. Models run locally via WebGPU or WebAssembly.</p>
+          <h1 data-i18n="app.heading">Whisper</h1>
+          <p class="subtitle" data-i18n="app.subtitle">Volledig privé transcriptie: audio en tekst verlaten nooit deze browser. Modellen draaien lokaal via WebGPU of WebAssembly.</p>
         </div>
-        <button type="button" id="lockBtn" style="display:none;" title="Lock the app: clears decrypted data from this screen and from memory">Lock</button>
+        <div class="header-actions">
+          <button type="button" id="langToggleBtn" title="Switch interface language">English</button>
+          <button type="button" id="lockBtn" style="display:none;" data-i18n-title="lock.title" title="App vergrendelen: gewiste ontsleutelde gegevens van dit scherm en uit het geheugen" data-i18n="lock.btn">Vergrendelen</button>
+        </div>
       </div>
     </header>
 
     <div class="status-bar">
-      <span>Engine: <span class="badge" id="engineBadge">detecting…</span></span>
-      <span class="model-status" id="modelStatus">Model not loaded yet — it downloads on first transcription, then is cached for offline use.</span>
+      <span><span data-i18n="engine.label">Engine:</span> <span class="badge" id="engineBadge">detecteren…</span></span>
+      <span class="model-status" id="modelStatus">Model nog niet geladen — wordt bij de eerste transcriptie gedownload en daarna offline gecachet.</span>
       <div class="progress-wrap" id="progressWrap"><div class="progress-bar" id="progressBar"></div></div>
     </div>
 
     <div class="recovery-banner" id="recoveryBanner" role="alert">
       <p id="recoveryMessage"></p>
       <div class="recovery-actions">
-        <button type="button" id="recoveryRecoverBtn" class="primary">Recover</button>
-        <button type="button" id="recoveryDiscardBtn" class="danger">Discard</button>
+        <button type="button" id="recoveryRecoverBtn" class="primary" data-i18n="recovery.recover">Herstellen</button>
+        <button type="button" id="recoveryDiscardBtn" class="danger" data-i18n="recovery.discard">Weggooien</button>
       </div>
     </div>
 
     <div class="main-grid">
       <!-- Section A: Transcribe -->
       <div class="panel">
-        <h2>Transcribe</h2>
+        <h2 data-i18n="transcribe.title">Transcriberen</h2>
         <div class="row">
-          <button type="button" id="recordBtn" class="record">Record</button>
+          <button type="button" id="recordBtn" class="record" data-i18n="transcribe.record">Opnemen</button>
           <span class="upload-wrap">
-            <span>Upload file</span>
+            <span data-i18n="transcribe.upload">Bestand uploaden</span>
             <input type="file" id="fileInput" accept="audio/*,video/*" />
           </span>
         </div>
         <div id="recordingIndicator" class="recording-indicator" aria-live="polite">
           <span class="rec-dot" aria-hidden="true"></span>
           <span class="rec-time" id="recordingTime">0:00</span>
-          <span class="rec-paused hidden" id="recordingPaused">Paused</span>
+          <span class="rec-paused hidden" id="recordingPaused" data-i18n="transcribe.paused">Gepauzeerd</span>
           <div class="recording-actions">
-            <button type="button" id="pauseRecordBtn" class="record" style="display:none;">Pause</button>
+            <button type="button" id="pauseRecordBtn" class="record" style="display:none;" data-i18n="transcribe.pause">Pauzeren</button>
           </div>
         </div>
-        <p class="hint">Record up to 3 hours, or upload audio files. Formats: WAV, MP3, M4A, WebM, OGG, etc. Recordings are saved incrementally; drafts autosave during transcription.</p>
+        <p class="hint" data-i18n="transcribe.hint">Neem tot 3 uur op, of upload audiobestanden. Formaten: WAV, MP3, M4A, WebM, OGG, enz. Opnames worden tussentijds opgeslagen; concepten worden automatisch opgeslagen tijdens transcriptie.</p>
         <div class="row model-row">
-          <span class="model-label">Model:</span>
+          <span class="model-label" data-i18n="transcribe.model">Model:</span>
           <select id="modelSelect">
-            <option value="onnx-community/whisper-large-v3-turbo" selected>Whisper large v3 turbo (recommended)</option>
-            <option value="Xenova/whisper-medium">Whisper medium (lighter, for weaker PCs)</option>
-            <option value="Xenova/whisper-large-v3">Whisper large v3 (best accuracy, needs a powerful PC)</option>
+            <option value="onnx-community/whisper-large-v3-turbo" selected data-i18n="model.turbo">Whisper large v3 turbo (aanbevolen)</option>
+            <option value="Xenova/whisper-medium" data-i18n="model.medium">Whisper medium (lichter, voor zwakkere pc's)</option>
+            <option value="Xenova/whisper-large-v3" data-i18n="model.large">Whisper large v3 (beste nauwkeurigheid, krachtige pc nodig)</option>
           </select>
-          <span class="model-label">Language:</span>
+          <span class="model-label" data-i18n="transcribe.language">Taal:</span>
           <select id="languageSelect">
-            <option value="nl" selected>Dutch (Nederlands)</option>
-            <option value="en">English</option>
+            <option value="nl" selected data-i18n="whisperLang.dutch">Nederlands</option>
+            <option value="en" data-i18n="whisperLang.english">Engels</option>
           </select>
         </div>
         <div id="recordedSection" class="recorded-section hidden">
-          <strong style="display:block; margin-top:1rem;">Audio</strong>
+          <strong style="display:block; margin-top:1rem;" data-i18n="transcribe.audio">Audio</strong>
           <audio id="recordedAudio" controls style="display:block; width:100%; margin-top:0.35rem;"></audio>
-          <button type="button" id="transcribeBtn" class="primary" style="margin-top:0.5rem;">Transcribe</button>
+          <button type="button" id="transcribeBtn" class="primary" style="margin-top:0.5rem;" data-i18n="transcribe.transcribeBtn">Transcriberen</button>
           <div class="progress-wrap" id="transcribeProgressWrap" style="margin-top:0.5rem;"><div class="progress-bar" id="transcribeProgressBar"></div></div>
         </div>
-        <strong style="display:block; margin-top:1rem;">Transcript</strong>
-        <div id="result">Record or upload audio to transcribe.</div>
+        <strong style="display:block; margin-top:1rem;" data-i18n="transcribe.transcript">Transcriptie</strong>
+        <div id="result">Neem audio op of upload een bestand om te transcriberen.</div>
         <div class="transcript-actions">
-          <button type="button" id="saveBtn" class="primary" disabled>Save transcript</button>
-          <button type="button" id="downloadBtn" disabled>Download .txt</button>
-          <button type="button" id="reviewBtn" disabled title="Improve the transcript and review uncertain passages before filling the form">Improve &amp; review</button>
+          <button type="button" id="saveBtn" class="primary" disabled data-i18n="transcribe.save">Transcriptie opslaan</button>
+          <button type="button" id="downloadBtn" disabled data-i18n="transcribe.download">Download .txt</button>
+          <button type="button" id="reviewBtn" disabled data-i18n-title="transcribe.improveReviewTitle" title="Verbeter de transcriptie en beoordeel onzekere passages voordat u het formulier invult" data-i18n="transcribe.improveReview">Verbeteren &amp; beoordelen</button>
         </div>
       </div>
 
       <!-- Section B: Saved transcripts -->
       <div class="panel">
-        <h2>Saved transcripts</h2>
+        <h2 data-i18n="saved.title">Opgeslagen transcripties</h2>
         <ul class="saved-list" id="savedList">
-          <li class="empty-state">Loading…</li>
+          <li class="empty-state" data-i18n="saved.loading">Laden…</li>
         </ul>
         <div class="detail-panel hidden" id="detailPanel">
           <div class="detail-header">
             <h3 id="detailTitle">—</h3>
-            <button type="button" id="backToListBtn">Back to list</button>
+            <button type="button" id="backToListBtn" data-i18n="saved.back">Terug naar lijst</button>
           </div>
           <div id="detailRecordingSection" class="detail-recording-section hidden">
-            <strong class="detail-recording-label">Audio</strong>
+            <strong class="detail-recording-label" data-i18n="saved.audio">Audio</strong>
             <audio id="detailAudio" controls style="display:block; width:100%; margin-top:0.35rem;"></audio>
             <div class="row model-row detail-retranscribe-row">
-              <button type="button" id="detailRetranscribeBtn" class="primary">Re-transcribe</button>
-              <button type="button" id="detailResumeTranscribeBtn" class="primary" style="display:none;">Resume transcription</button>
-              <span class="hint" style="margin-top:0;">Uses the model and language selected on the left.</span>
+              <button type="button" id="detailRetranscribeBtn" class="primary" data-i18n="saved.retranscribe">Opnieuw transcriberen</button>
+              <button type="button" id="detailResumeTranscribeBtn" class="primary" style="display:none;" data-i18n="saved.resumeTranscribe">Transcriptie hervatten</button>
+              <span class="hint" style="margin-top:0;" data-i18n="saved.retranscribeHint">Gebruikt het model en de taal links geselecteerd.</span>
             </div>
-            <a id="detailDownloadAudioLink" class="button-as-link" href="#" download="recording.webm" style="display:inline-block; margin-top:0.5rem;">Download audio</a>
+            <a id="detailDownloadAudioLink" class="button-as-link" href="#" download="recording.webm" style="display:inline-block; margin-top:0.5rem;" data-i18n="saved.downloadAudio">Audio downloaden</a>
           </div>
           <div class="detail-content" id="detailContent"></div>
           <textarea class="detail-edit-area hidden" id="detailEditArea"></textarea>
           <div class="detail-actions">
-            <button type="button" id="detailEditBtn">Edit</button>
-            <button type="button" id="detailSaveEditBtn" class="primary" style="display:none;">Save changes</button>
-            <button type="button" id="detailCancelEditBtn" style="display:none;">Cancel</button>
-            <button type="button" id="detailRenameBtn">Rename</button>
-            <button type="button" id="detailDownloadBtn">Download .txt</button>
-            <button type="button" id="detailFillFormBtn">Improve &amp; review</button>
+            <button type="button" id="detailEditBtn" data-i18n="saved.edit">Bewerken</button>
+            <button type="button" id="detailSaveEditBtn" class="primary" style="display:none;" data-i18n="saved.saveChanges">Wijzigingen opslaan</button>
+            <button type="button" id="detailCancelEditBtn" style="display:none;" data-i18n="saved.cancel">Annuleren</button>
+            <button type="button" id="detailRenameBtn" data-i18n="saved.rename">Hernoemen</button>
+            <button type="button" id="detailDownloadBtn" data-i18n="saved.downloadTxt">Download .txt</button>
+            <button type="button" id="detailFillFormBtn" data-i18n="transcribe.improveReview">Verbeteren &amp; beoordelen</button>
           </div>
         </div>
       </div>
@@ -587,34 +591,34 @@
 
     <!-- Local AI status (shared by the correction + form-filling model) -->
     <div class="status-bar llm-status-bar">
-      <span>AI-model: <span class="model-status" id="llmStatus">The local assistant (Qwen2.5 1.5B, ~900 MB) downloads on first use, then is cached for offline use. Runs locally via WebGPU.</span></span>
+      <span><span data-i18n="llm.label">AI-model:</span> <span class="model-status" id="llmStatus">De lokale assistent (Qwen2.5 1.5B, ~900 MB) wordt bij eerste gebruik gedownload en daarna offline gecachet. Draait lokaal via WebGPU.</span></span>
       <div class="progress-wrap" id="llmProgressWrap"><div class="progress-bar" id="llmProgressBar"></div></div>
     </div>
 
     <!-- Step 2: Review & correct transcript -->
     <div class="panel form-panel review-panel hidden" id="reviewPanel">
-      <h2>Step 2 — Review &amp; correct transcript</h2>
-      <p class="hint">The AI improves spelling, grammar and clear recognition errors without changing clinical meaning. Uncertain passages are flagged. Review every red passage before generating the form.</p>
+      <h2 data-i18n="review.title">Stap 2 — Transcriptie beoordelen &amp; corrigeren</h2>
+      <p class="hint" data-i18n="review.hint">De AI verbetert spelling, grammatica en duidelijke herkenningsfouten zonder klinische betekenis te wijzigen. Onzekere passages worden gemarkeerd. Beoordeel elke rode passage voordat u het formulier genereert.</p>
       <div id="reviewRoot"></div>
     </div>
 
     <!-- Step 3: Medical form -->
     <div class="panel form-panel hidden" id="formPanel">
-      <h2>Step 3 — Medical form</h2>
+      <h2 data-i18n="form.title">Stap 3 — Medisch formulier</h2>
       <div id="formPanelStatus" class="form-panel-status hidden" aria-live="polite"></div>
       <div class="form-grid">
         <div>
-          <h3>Form fields (template)</h3>
+          <h3 data-i18n="form.templateTitle">Formuliervelden (sjabloon)</h3>
           <div id="templateFields"></div>
           <div class="row template-actions">
-            <button type="button" id="addFieldBtn">Add field</button>
-            <button type="button" id="resetTemplateBtn">Reset to default</button>
+            <button type="button" id="addFieldBtn" data-i18n="form.addField">Veld toevoegen</button>
+            <button type="button" id="resetTemplateBtn" data-i18n="form.resetTemplate">Standaard herstellen</button>
           </div>
-          <p class="hint">Define which fields the AI should fill from the reviewed transcript. The hint tells the model what to extract. Changes are saved automatically.</p>
+          <p class="hint" data-i18n="form.templateHint">Definieer welke velden de AI uit de beoordeelde transcriptie moet invullen. De hint vertelt het model wat te extraheren. Wijzigingen worden automatisch opgeslagen.</p>
         </div>
         <div>
-          <h3>Filled form</h3>
-          <div id="formReviewRoot"><p class="empty-state">Review the transcript, then click "Genereer formulier" to fill these fields with source traceability.</p></div>
+          <h3 data-i18n="form.filledTitle">Ingevuld formulier</h3>
+          <div id="formReviewRoot"><p class="empty-state" id="formReviewEmpty">Beoordeel de transcriptie en klik op "Genereer formulier" om deze velden met brontraceerbaarheid in te vullen.</p></div>
         </div>
       </div>
     </div>
@@ -624,15 +628,15 @@
 
   <div class="login-overlay" id="loginOverlay">
     <form class="login-card" id="loginForm">
-      <h2>Whisper</h2>
-      <p class="login-sub">Clinician login. Your transcripts are encrypted with a key derived from your password and never leave this browser.</p>
-      <label>Username
+      <h2 data-i18n="login.title">Whisper</h2>
+      <p class="login-sub" data-i18n="login.sub">Inloggen voor clinicus. Uw transcripties worden versleuteld met een sleutel afgeleid van uw wachtwoord en verlaten nooit deze browser.</p>
+      <label><span data-i18n="login.username">Gebruikersnaam</span>
         <input type="text" id="loginUsername" autocomplete="username" required>
       </label>
-      <label>Password
+      <label><span data-i18n="login.password">Wachtwoord</span>
         <input type="password" id="loginPassword" autocomplete="current-password" required>
       </label>
-      <button type="submit" class="primary" id="loginSubmitBtn">Unlock</button>
+      <button type="submit" class="primary" id="loginSubmitBtn" data-i18n="login.unlock">Ontgrendelen</button>
       <p class="login-error" id="loginError" aria-live="polite"></p>
     </form>
   </div>

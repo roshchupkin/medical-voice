@@ -77,14 +77,43 @@ export function buildEditLog(correctedSegments, edits, ruleApplications = []) {
 
 // Resolves the full source chain for a given segment id across all versions.
 // Used by the form traceability UI.
+
+export function normalizeSegmentId(raw) {
+  if (raw === null || raw === undefined) return '';
+  const s = String(raw).trim();
+  if (!s) return '';
+  const m = s.match(/^(?:segment\s*)?s?(\d+)$/i);
+  if (m) return `s${m[1]}`;
+  return s;
+}
+
+function findRawSegment(rawSegments, id) {
+  const norm = normalizeSegmentId(id);
+  if (!norm) return null;
+  return (rawSegments || []).find((s) => normalizeSegmentId(s.id) === norm) || null;
+}
+
+function findCorrectedSegment(correctedSegments, id) {
+  const norm = normalizeSegmentId(id);
+  if (!norm) return null;
+  return (correctedSegments || []).find((s) => normalizeSegmentId(s.segment_id) === norm) || null;
+}
+
+function findFinalSegment(finalSegments, id) {
+  const norm = normalizeSegmentId(id);
+  if (!norm) return null;
+  return (finalSegments || []).find((s) => normalizeSegmentId(s.id) === norm) || null;
+}
+
 export function resolveSegmentChain(segmentId, { rawSegments, correctedSegments, finalSegments, annotations, edits }) {
-  const id = String(segmentId);
-  const raw = (rawSegments || []).find((s) => s.id === id) || null;
-  const corrected = (correctedSegments || []).find((s) => s.segment_id === id) || null;
-  const fin = (finalSegments || []).find((s) => s.id === id) || null;
-  const annotation = (annotations || []).find((a) => a.segment_id === id) || null;
+  const id = normalizeSegmentId(segmentId);
+  if (!id) return null;
+  const raw = findRawSegment(rawSegments, id);
+  const corrected = findCorrectedSegment(correctedSegments, id);
+  const fin = findFinalSegment(finalSegments, id);
+  const annotation = (annotations || []).find((a) => normalizeSegmentId(a.segment_id) === id) || null;
   const editMap = edits instanceof Map ? edits : new Map(Object.entries(edits || {}));
-  const edit = editMap.get(id) || null;
+  const edit = editMap.get(id) || editMap.get(segmentId) || null;
   const edited = !!fin && fin.source === 'clinician';
   return {
     segment_id: id,

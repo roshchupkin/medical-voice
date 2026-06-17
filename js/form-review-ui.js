@@ -11,7 +11,7 @@
 // the full provenance (all three transcript versions, edit log, annotations,
 // and the traceable form).
 
-import { resolveSegmentChain } from './final-transcript.js';
+import { resolveSegmentChain, normalizeSegmentId } from './final-transcript.js';
 import { t, onLangChange } from './i18n.js';
 
 function el(tag, className, text) {
@@ -112,10 +112,28 @@ export function createFormReviewUI(root, callbacks = {}) {
     warnings.append(ul);
   }
 
+  function enrichFieldSource(field) {
+    if (!pipeline) return;
+    const normSid = normalizeSegmentId(field.source_segment_id);
+    if (!normSid) return;
+    field.source_segment_id = normSid;
+    if (field.source_sentence && field.source_sentence.trim()) return;
+    const chain = resolveSegmentChain(normSid, {
+      rawSegments: pipeline.raw.segments,
+      correctedSegments: pipeline.correction ? pipeline.correction.segments : [],
+      finalSegments: pipeline.finalTranscript ? pipeline.finalTranscript.segments : [],
+      annotations: pipeline.annotations,
+      edits: pipeline.edits,
+    });
+    if (!chain) return;
+    field.source_sentence = chain.final || chain.corrected || chain.raw || '';
+  }
+
   function renderFields() {
     fieldsWrap.innerHTML = '';
     if (!pipeline || !pipeline.form) return;
     for (const field of formFields(pipeline.form)) {
+      enrichFieldSource(field);
       const wrap = el('div', 'tform-field' + (field.needs_review ? ' needs-review' : ''));
 
       const labelRow = el('div', 'tform-label-row');
@@ -137,7 +155,26 @@ export function createFormReviewUI(root, callbacks = {}) {
 
       if (field.warning) wrap.append(el('p', 'tform-warning', field.warning));
 
-      const srcBtn = el('button', 'button-as-link', t('form.showSource'));
+      const normSid = normalizeSegmentId(field.source_segment_id);
+      if (normSid && normSid !== field.source_segment_id) field.source_segment_id = normSid;
+
+      if (field.source_sentence || field.source_segment_id) {
+        const teaserText = field.source_sentence
+          ? field.source_sentence
+          : t('form.sourceNoSentence');
+        const teaser = el('p', 'tform-source-teaser');
+        if (field.source_segment_id) {
+          teaser.append(
+            el('span', 'tform-source-seg', `${t('form.sourceSegment')}: ${field.source_segment_id}`),
+            document.createTextNode(' — ' + teaserText),
+          );
+        } else {
+          teaser.textContent = teaserText;
+        }
+        wrap.append(teaser);
+      }
+
+      const srcBtn = el('button', 'button-as-link tform-source-btn', t('form.showSource'));
       srcBtn.type = 'button';
       const srcPanel = el('div', 'tform-source hidden');
       srcBtn.addEventListener('click', () => {
@@ -156,13 +193,16 @@ export function createFormReviewUI(root, callbacks = {}) {
 
   function buildSourcePanel(panel, field) {
     panel.innerHTML = '';
+    const normSid = normalizeSegmentId(field.source_segment_id);
+    if (normSid && normSid !== field.source_segment_id) field.source_segment_id = normSid;
+
     const stated = field.was_inferred ? t('form.sourceInferred') : t('form.sourceStated');
     panel.append(traceRow(t('form.sourceStatus'), stated));
     panel.append(traceRow(t('form.sourceConfidence'), confLabel(field.confidence)));
     panel.append(traceRow(t('form.sourceSentence'), field.source_sentence || '—'));
 
-    const chain = field.source_segment_id
-      ? resolveSegmentChain(field.source_segment_id, {
+    const chain = normSid
+      ? resolveSegmentChain(normSid, {
           rawSegments: pipeline.raw.segments,
           correctedSegments: pipeline.correction ? pipeline.correction.segments : [],
           finalSegments: pipeline.finalTranscript ? pipeline.finalTranscript.segments : [],
@@ -213,6 +253,30 @@ export function createFormReviewUI(root, callbacks = {}) {
     }
   }
 
+  function showLoading(message) {
+    warnings.innerHTML = '';
+    missingWrap.innerHTML = '';
+    fieldsWrap.innerHTML = '';
+    statusEl.textContent = '';
+    fieldsWrap.append(el('p', 'empty-state loading', message || t('form.extracting')));
+  }
+
+  function showError(message) {
+    warnings.innerHTML = '';
+    missingWrap.innerHTML = '';
+    fieldsWrap.innerHTML = '';
+    statusEl.textContent = '';
+    fieldsWrap.append(el('p', 'empty-state error', message));
+  }
+
+  function showEmpty() {
+    warnings.innerHTML = '';
+    missingWrap.innerHTML = '';
+    fieldsWrap.innerHTML = '';
+    statusEl.textContent = '';
+    fieldsWrap.append(el('p', 'empty-state', t('form.empty')));
+  }
+
   function fullRender() {
     refreshActionLabels();
     renderWarnings();
@@ -223,7 +287,12 @@ export function createFormReviewUI(root, callbacks = {}) {
 
   onLangChange(() => {
     if (pipeline) fullRender();
-    else refreshActionLabels();
+    else {
+      refreshActionLabels();
+      if (fieldsWrap.querySelector('.empty-state') && !fieldsWrap.querySelector('.tform-field')) {
+        showEmpty();
+      }
+    }
   });
 
   return {
@@ -236,11 +305,18 @@ export function createFormReviewUI(root, callbacks = {}) {
     },
     clear() {
       pipeline = null;
-      warnings.innerHTML = '';
-      fieldsWrap.innerHTML = '';
-      missingWrap.innerHTML = '';
-      statusEl.textContent = '';
       refreshActionLabels();
+      showEmpty();
+    },
+    showLoading(message) {
+      pipeline = null;
+      refreshActionLabels();
+      showLoading(message);
+    },
+    showError(message) {
+      pipeline = null;
+      refreshActionLabels();
+      showError(message);
     },
   };
 }
@@ -258,6 +334,7 @@ export function exportFinalForm(pipeline, filename) {
     annotations: pipeline.annotations || [],
     editLog: pipeline.editLog || [],
     form: pipeline.form || null,
+    performanceMetrics: pipeline.metrics || null,
   };
   const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');

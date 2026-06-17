@@ -5,7 +5,8 @@
 //               { type: 'progress', file, loaded, total }
 //               { type: 'ready', modelId, device }
 //               { type: 'partial', id, text }
-//               { type: 'complete', id, text, chunks }
+//               { type: 'complete', id, text, chunks, metrics? }
+//               { type: 'ready', modelId, device, metrics? }
 //               { type: 'error', id?, message }
 //
 // `chunks` carries segment-level timestamps ([{ text, timestamp: [start, end] }])
@@ -41,11 +42,32 @@ function progressCallback(p) {
   }
 }
 
+function heapSnapshot() {
+  const mem = performance.memory;
+  if (!mem || typeof mem.usedJSHeapSize !== 'number') return null;
+  return mem.usedJSHeapSize;
+}
+
+function buildMetrics(t0, memBefore) {
+  const memAfter = heapSnapshot();
+  return {
+    durationMs: performance.now() - t0,
+    memory: {
+      available: memBefore != null || memAfter != null,
+      heapUsedBefore: memBefore,
+      heapUsedAfter: memAfter,
+      heapDelta: (memBefore != null && memAfter != null) ? memAfter - memBefore : null,
+    },
+  };
+}
+
 async function loadModel(modelId) {
   if (transcriber && currentModelId === modelId) {
-    self.postMessage({ type: 'ready', modelId, device });
+    self.postMessage({ type: 'ready', modelId, device, metrics: { durationMs: 0, cached: true } });
     return;
   }
+  const t0 = performance.now();
+  const memBefore = heapSnapshot();
   if (transcriber) {
     try { await transcriber.dispose(); } catch (_) { /* best effort */ }
     transcriber = null;
@@ -76,10 +98,13 @@ async function loadModel(modelId) {
     }
   }
   currentModelId = modelId;
-  self.postMessage({ type: 'ready', modelId, device });
+  self.postMessage({ type: 'ready', modelId, device, metrics: buildMetrics(t0, memBefore) });
 }
 
 async function transcribe({ id, audio, language }) {
+  const t0 = performance.now();
+  const memBefore = heapSnapshot();
+  const audioSamples = audio ? audio.length : 0;
   if (!transcriber) {
     self.postMessage({ type: 'error', id, message: 'Model not loaded.' });
     return;
@@ -120,7 +145,11 @@ async function transcribe({ id, audio, language }) {
     text: c.text || '',
     timestamp: Array.isArray(c.timestamp) ? c.timestamp : null,
   })) : [];
-  self.postMessage({ type: 'complete', id, text: text || '(no speech detected)', chunks });
+  const metrics = buildMetrics(t0, memBefore);
+  metrics.audioSamples = audioSamples;
+  metrics.audioPcm = audioSamples * 4;
+  metrics.transcriptUtf8 = new TextEncoder().encode(text || '').length;
+  self.postMessage({ type: 'complete', id, text: text || '(no speech detected)', chunks, metrics });
 }
 
 self.onmessage = async (e) => {

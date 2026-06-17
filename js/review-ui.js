@@ -108,10 +108,13 @@ export function createReviewUI(root, callbacks = {}) {
         mode: modeSel.value,
         scope: scopeSel.value,
       };
-      if (!rule.from || (rule.mode !== 'protect' && !rule.to)) return;
+      if (!rule.from || (rule.mode !== 'protect' && !rule.to)) {
+        if (onNotify) onNotify(t('review.ruleIncomplete'), 4000);
+        return;
+      }
       if (onAddRule) await onAddRule(rule);
       fromIn.value = ''; toIn.value = '';
-      note.textContent = t('review.ruleSaved');
+      note.textContent = t('review.ruleHint');
     });
     return { wrap, summary, fromIn, toIn, modeSel, scopeSel, addBtn, note };
   }
@@ -215,6 +218,7 @@ export function createReviewUI(root, callbacks = {}) {
     selectedId = id;
     renderTranscript();
     renderEditor();
+    editorPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
   function renderEditor() {

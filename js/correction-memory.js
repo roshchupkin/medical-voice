@@ -118,3 +118,66 @@ export function applyLocalCorrectionRules(rawTranscript, rules) {
 
   return { text, applied, protectedTerms };
 }
+
+// Applies replace/expand rules to an existing correction (review step) without
+// re-running the LLM. Updates corrected text and any clinician edits in place.
+export function applyRulesToCorrectionPipeline(pipeline, rules) {
+  const correction = pipeline?.correction;
+  if (!correction || !Array.isArray(correction.segments)) {
+    return { applied: [], replacements: 0 };
+  }
+  const edits = pipeline.edits || {};
+  const ruleApplications = [];
+  let replacements = 0;
+  const replaceExpand = (rules || []).filter((r) => r.mode === 'replace' || r.mode === 'expand');
+
+  for (const seg of correction.segments) {
+    const sid = seg.segment_id;
+    const edit = edits[sid];
+
+    const applyTo = (text) => {
+      let out = text || '';
+      for (const rule of replaceExpand) {
+        if (!rule.from || !rule.to) continue;
+        const { text: next, count } = applySubstitution(out, rule.from, rule.to);
+        if (count > 0) {
+          out = next;
+          replacements += count;
+          ruleApplications.push({
+            from: rule.from,
+            to: rule.to,
+            mode: rule.mode,
+            count,
+            scope: rule.scope,
+            segment_id: sid,
+            at: new Date().toISOString(),
+          });
+        }
+      }
+      return out;
+    };
+
+    const nextOriginal = applyTo(seg.original_text);
+    const nextCorrected = applyTo(seg.corrected_text);
+    if (nextOriginal !== seg.original_text) seg.original_text = nextOriginal;
+    if (nextCorrected !== seg.corrected_text) seg.corrected_text = nextCorrected;
+
+    if (edit && typeof edit.after === 'string' && edit.after.trim()) {
+      const nextAfter = applyTo(edit.after);
+      if (nextAfter !== edit.after) edit.after = nextAfter;
+    }
+  }
+
+  correction.correctedText = correction.segments
+    .map((s) => {
+      const e = edits[s.segment_id];
+      if (e?.action === 'reject') return s.original_text;
+      if (e?.after) return e.after;
+      return s.corrected_text;
+    })
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+
+  return { applied: ruleApplications, replacements };
+}

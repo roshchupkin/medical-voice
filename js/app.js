@@ -20,6 +20,17 @@ import { createFormReviewUI, exportFinalForm, normalizePipelineForm } from './fo
 import { assertFormGenerationAllowed } from './safety.js';
 import { probeWebGpuAvailable } from './webgpu-probe.js';
 import { t, applyStatic, onLangChange, toggleLang, getDefaultTemplate, getLang } from './i18n.js';
+import {
+  createMetricsRun,
+  measureStep,
+  measureStepSync,
+  recordStep,
+  finalizeRun,
+  mergeMetrics,
+  renderMetricsTable,
+  sumFileProgressBytes,
+  utf8ByteLength,
+} from './perf-metrics.js';
 
 // --- DOM ---
 const loginOverlay = document.getElementById('loginOverlay');
@@ -84,6 +95,10 @@ const recoveryDiscardBtn = document.getElementById('recoveryDiscardBtn');
 const transcribeProgressWrap = document.getElementById('transcribeProgressWrap');
 const transcribeProgressBar = document.getElementById('transcribeProgressBar');
 const detailResumeTranscribeBtn = document.getElementById('detailResumeTranscribeBtn');
+const perfPanel = document.getElementById('perfPanel');
+const perfPanelBody = document.getElementById('perfPanelBody');
+const detailPerfPanel = document.getElementById('detailPerfPanel');
+const detailPerfPanelBody = document.getElementById('detailPerfPanelBody');
 
 // --- State ---
 let currentTranscriptText = '';
@@ -99,6 +114,9 @@ let isTranscribing = false;
 let isExtracting = false;           // true during correction OR form filling
 let llmSupported = false;           // set by probeWebGpu() — needs a working adapter, not just navigator.gpu
 let llmUnavailableReason = '';
+let currentMetrics = null;          // { transcription, correction, form, lastUpdated }
+let activeLlmMetricsRun = null;     // metrics run for in-flight LLM phase
+let lastWhisperReadyMetrics = null; // worker-reported load metrics
 
 const UPLOAD_WARN_BYTES = 15 * 1024 * 1024; // ~1 h of Opus WebM at typical bitrates
 
@@ -108,6 +126,45 @@ function debounce(fn, ms) {
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => { timer = null; fn(...args); }, ms);
   };
+}
+
+function renderPerfPanel(metrics = currentMetrics) {
+  renderMetricsTable(metrics, perfPanelBody);
+}
+
+function renderDetailPerfPanel(metrics) {
+  if (!detailPerfPanelBody) return;
+  renderMetricsTable(metrics, detailPerfPanelBody);
+}
+
+function applyMetrics(metrics) {
+  currentMetrics = metrics;
+  if (pipeline) pipeline.metrics = metrics;
+  renderPerfPanel(metrics);
+  if (currentDetailTranscript) {
+    currentDetailTranscript.metrics = metrics;
+    renderDetailPerfPanel(metrics);
+  }
+}
+
+async function persistMetricsNow() {
+  if (!auth.isUnlocked() || !currentMetrics) return;
+  const id = pipeline?.id || currentDraftId;
+  if (!id) return;
+  try {
+    await db.updateTranscript(id, { metrics: currentMetrics });
+  } catch (_) { /* best-effort */ }
+}
+
+function patchWhisperLoadStep(metricsRun) {
+  if (!metricsRun) return;
+  const step = metricsRun.steps.find((s) => s.id === 'whisperModelLoad');
+  if (!step) return;
+  step.spaceBytes.download = sumFileProgressBytes(fileProgress);
+  if (lastWhisperReadyMetrics && !lastWhisperReadyMetrics.cached) {
+    step.durationMs = lastWhisperReadyMetrics.durationMs ?? step.durationMs;
+    if (lastWhisperReadyMetrics.memory) step.memory = lastWhisperReadyMetrics.memory;
+  }
 }
 
 // The staged pipeline currently under review/editing. One shared object drives
@@ -150,6 +207,7 @@ worker.onmessage = (e) => {
       break;
     }
     case 'ready': {
+      if (msg.metrics) lastWhisperReadyMetrics = msg.metrics;
       modelReady = { modelId: msg.modelId };
       progressWrap.classList.remove('visible');
       progressBar.style.width = '0%';
@@ -168,7 +226,10 @@ worker.onmessage = (e) => {
     }
     case 'complete': {
       const job = pendingJobs.get(msg.id);
-      if (job) { pendingJobs.delete(msg.id); job.resolve({ text: msg.text, chunks: msg.chunks || [] }); }
+      if (job) {
+        pendingJobs.delete(msg.id);
+        job.resolve({ text: msg.text, chunks: msg.chunks || [], metrics: msg.metrics || null });
+      }
       break;
     }
     case 'error': {
@@ -442,7 +503,7 @@ const persistDraftPartial = debounce(async (patch) => {
   } catch (_) { /* best-effort */ }
 }, 30000);
 
-async function runMonolithicTranscription(blob, onPartialTarget) {
+async function runMonolithicTranscription(blob, onPartialTarget, metricsRun) {
   if (blob.size >= UPLOAD_WARN_BYTES) {
     showToast(t('toast.largeFile'), 8000);
   }
@@ -454,14 +515,56 @@ async function runMonolithicTranscription(blob, onPartialTarget) {
       transcription: { ...prev, complete: false, monolithic: true, started: true },
     });
   }
+
   let audioData;
-  try {
-    audioData = await decodeToMono16k(blob);
-  } catch (err) {
-    throw new Error('Could not decode this audio file. ' + (err.message || ''));
+  if (metricsRun) {
+    const inputSize = blob.size;
+    try {
+      audioData = await measureStep(
+        metricsRun,
+        'audioDecode',
+        t('perf.stepAudioDecode'),
+        () => decodeToMono16k(blob),
+        {
+          input: inputSize,
+          _fromResult: (data) => ({ output: data.byteLength, audioPcm: data.byteLength }),
+        },
+      );
+    } catch (err) {
+      throw new Error('Could not decode this audio file. ' + (err.message || ''));
+    }
+    lastWhisperReadyMetrics = null;
+    await measureStep(metricsRun, 'whisperModelLoad', t('perf.stepWhisperLoad'), () => ensureModelLoaded());
+    patchWhisperLoadStep(metricsRun);
+  } else {
+    try {
+      audioData = await decodeToMono16k(blob);
+    } catch (err) {
+      throw new Error('Could not decode this audio file. ' + (err.message || ''));
+    }
+    await ensureModelLoaded();
   }
-  await ensureModelLoaded();
-  const { text, chunks } = await transcribeInWorker(audioData, language, onPartialTarget);
+
+  const workerResult = await transcribeInWorker(audioData, language, onPartialTarget);
+  const { text, chunks, metrics: wm } = workerResult;
+  if (metricsRun) {
+    recordStep(metricsRun, 'whisperTranscribe', t('perf.stepWhisperTranscribe'), {
+      durationMs: wm?.durationMs,
+      spaceBytes: {
+        audioPcm: wm?.audioPcm,
+        audioDurationSec: wm?.audioSamples ? wm.audioSamples / 16000 : undefined,
+        transcriptUtf8: wm?.transcriptUtf8 ?? utf8ByteLength(text),
+      },
+      memory: wm?.memory,
+    });
+    const segments = splitIntoSegments(text, chunks);
+    recordStep(metricsRun, 'segmentSplit', t('perf.stepSegmentSplit'), {
+      durationMs: 0,
+      spaceBytes: { segmentCount: segments.length, transcriptUtf8: utf8ByteLength(text) },
+      memory: { available: false, heapUsedBefore: null, heapUsedAfter: null, heapDelta: null },
+    });
+  }
+
   if (currentDraftId) {
     const raw = { text, segments: splitIntoSegments(text, chunks), modelId: modelSelect.value };
     await db.updateTranscript(currentDraftId, {
@@ -474,7 +577,7 @@ async function runMonolithicTranscription(blob, onPartialTarget) {
   return { text, chunks };
 }
 
-async function runSegmentedTranscription(onPartialTarget) {
+async function runSegmentedTranscription(onPartialTarget, metricsRun) {
   if (!currentRecordingSessionId) throw new Error('No recording session');
   const language = languageSelect.value || null;
   const modelId = modelSelect.value;
@@ -485,6 +588,7 @@ async function runSegmentedTranscription(onPartialTarget) {
     loadSavedList();
   }
 
+  lastWhisperReadyMetrics = null;
   const updated = await transcribeSegments.transcribeRecordingSession(
     currentRecordingSessionId,
     currentDraftId,
@@ -493,6 +597,8 @@ async function runSegmentedTranscription(onPartialTarget) {
       modelId,
       ensureModelLoaded,
       transcribeInWorker,
+      metricsRun,
+      onWhisperLoad: () => patchWhisperLoadStep(metricsRun),
       onProgress: ({ segment, totalSegments, message }) => {
         setLoading(message);
         setTranscribeProgress(segment, totalSegments);
@@ -509,10 +615,22 @@ async function runSegmentedTranscription(onPartialTarget) {
 
 // --- Transcription flow ---
 async function runTranscription(blob, onPartialTarget) {
+  const metricsRun = createMetricsRun({
+    phase: 'transcription',
+    meta: { modelId: modelSelect.value, language: languageSelect.value || 'auto' },
+  });
+  let result;
   if (currentRecordingSessionId) {
-    return runSegmentedTranscription(onPartialTarget);
+    result = await runSegmentedTranscription(onPartialTarget, metricsRun);
+  } else {
+    result = await runMonolithicTranscription(blob, onPartialTarget, metricsRun);
   }
-  return runMonolithicTranscription(blob, onPartialTarget);
+  finalizeRun(metricsRun);
+  currentMetrics = mergeMetrics(currentMetrics, 'transcription', metricsRun);
+  if (pipeline) pipeline.metrics = currentMetrics;
+  renderPerfPanel();
+  await persistMetricsNow();
+  return result;
 }
 
 transcribeBtn.addEventListener('click', async () => {
@@ -777,6 +895,9 @@ saveBtn.addEventListener('click', async () => {
       entry.finalTranscript = pipeline.finalTranscript;
       entry.editLog = pipeline.editLog;
       entry.form = pipeline.form;
+      entry.metrics = pipeline.metrics || currentMetrics;
+    } else if (currentMetrics) {
+      entry.metrics = currentMetrics;
     }
     if (currentDraftId) {
       const existing = await db.getTranscript(id);
@@ -901,6 +1022,9 @@ async function openTranscript(id) {
       loadPipelineFromEntry(entry);
     } else {
       resetPipelineUI();
+      currentMetrics = entry.metrics || null;
+      renderPerfPanel(entry.metrics);
+      renderDetailPerfPanel(entry.metrics);
     }
     detailPanel.classList.remove('hidden');
     updateBusyButtons();
@@ -991,18 +1115,26 @@ detailRetranscribeBtn.addEventListener('click', async () => {
   const originalText = currentDetailTranscript.text || '';
   detailContent.textContent = t('status.retranscribing');
   try {
+    const metricsRun = createMetricsRun({
+      phase: 'transcription',
+      meta: { modelId: modelSelect.value, retranscribe: true },
+    });
     const { text, chunks } = await runMonolithicTranscription(rec.blob, (partial) => {
       if (!auth.isUnlocked()) return;
       detailContent.textContent = partial;
-    });
+    }, metricsRun);
     if (!auth.isUnlocked()) return;
+    finalizeRun(metricsRun);
+    currentMetrics = mergeMetrics(currentDetailTranscript.metrics, 'transcription', metricsRun);
     const raw = { text, segments: splitIntoSegments(text, chunks), modelId: modelSelect.value };
     const updated = await db.updateTranscript(currentDetailTranscript.id, {
       text, raw, correction: null, annotations: null, edits: null, finalTranscript: null, editLog: null, form: null,
       transcription: { complete: true, monolithic: true, started: true, chunks: chunks || [] },
+      metrics: currentMetrics,
     });
     currentDetailTranscript = updated;
     detailContent.textContent = text;
+    applyMetrics(currentMetrics);
     detailResumeTranscribeBtn.style.display = 'none';
     showToast(t('toast.retranscribeDone'));
   } catch (e) {
@@ -1236,6 +1368,15 @@ function getLlmWorker() {
         break;
       case 'ready':
         llmModelReady = true;
+        if (msg.metrics && activeLlmMetricsRun) {
+          const hasLoad = activeLlmMetricsRun.steps.some((s) => s.id === 'llmModelLoad');
+          if (!hasLoad) {
+            recordStep(activeLlmMetricsRun, 'llmModelLoad', t('perf.stepLlmLoad'), {
+              durationMs: msg.metrics.durationMs,
+              memory: msg.metrics.memory,
+            });
+          }
+        }
         setLlmProgress(t('llm.ready'));
         break;
       case 'complete': {
@@ -1279,7 +1420,7 @@ function llmRequest(payload) {
 }
 
 function correctInWorker(window, protectedTerms, knownTerms) {
-  return llmRequest({ type: 'correct', window, protectedTerms, knownTerms }).then((m) => m.result);
+  return llmRequest({ type: 'correct', window, protectedTerms, knownTerms });
 }
 
 function extractInWorker(transcript, segments, schema) {
@@ -1287,6 +1428,7 @@ function extractInWorker(transcript, segments, schema) {
   return llmRequest({ type: 'extract', transcript, segments: filtered, schema }).then((m) => ({
     data: m.data,
     truncated: m.truncated || wasFiltered,
+    metrics: m.metrics || null,
   }));
 }
 
@@ -1302,7 +1444,25 @@ const reviewUI = createReviewUI(reviewRoot, {
     try {
       if (rule.scope === 'session') correctionMemory.addSessionRule(rule);
       else await correctionMemory.addPersistentRule(rule);
-      showToast(t('toast.ruleSaved'));
+
+      if (pipeline?.correction && rule.mode !== 'protect') {
+        const rules = await correctionMemory.getActiveRules({ specialty: null });
+        const { applied, replacements } = correctionMemory.applyRulesToCorrectionPipeline(pipeline, rules);
+        if (applied.length) {
+          pipeline.ruleApplications = [...(pipeline.ruleApplications || []), ...applied];
+        }
+        reviewUI.render(pipeline);
+        persistPipeline();
+        if (replacements > 0) {
+          showToast(t('toast.ruleApplied', { count: replacements }));
+        } else {
+          showToast(t('toast.ruleNoMatch'));
+        }
+      } else if (pipeline?.correction && rule.mode === 'protect') {
+        showToast(t('toast.ruleProtectSaved'));
+      } else {
+        showToast(t('toast.ruleSaved'));
+      }
     } catch (_) {
       showToast(t('toast.ruleSaveFailed'));
     }
@@ -1328,21 +1488,24 @@ const persistPipeline = debounce(() => {
     finalTranscript: pipeline.finalTranscript,
     editLog: pipeline.editLog,
     form: pipeline.form,
+    metrics: pipeline.metrics || currentMetrics,
   }).then((updated) => {
     if (currentDetailTranscript && currentDetailTranscript.id === updated.id) currentDetailTranscript = updated;
   }).catch(() => showToast(t('toast.reviewSaveFailed')));
 }, 600);
 
-function buildPipeline({ id = null, title = '', language, text, segments }) {
+function buildPipeline({ id = null, title = '', language, text, segments, metrics = null }) {
   return {
     id, title, language,
     raw: { text, segments, modelId: modelSelect.value },
     correction: null, annotations: null, edits: {}, ruleApplications: [],
     finalTranscript: null, editLog: null, form: null,
+    metrics: metrics || currentMetrics,
   };
 }
 
 function loadPipelineFromEntry(entry) {
+  currentMetrics = entry.metrics || null;
   pipeline = {
     id: entry.id,
     title: entry.title || '',
@@ -1355,6 +1518,7 @@ function loadPipelineFromEntry(entry) {
     finalTranscript: entry.finalTranscript || null,
     editLog: entry.editLog || null,
     form: normalizePipelineForm(entry.form),
+    metrics: entry.metrics || null,
   };
   if (pipeline.correction) {
     reviewPanel.classList.remove('hidden');
@@ -1373,6 +1537,8 @@ function loadPipelineFromEntry(entry) {
     formReviewUI.clear();
     setFormPanelStatus('', '');
   }
+  renderPerfPanel(pipeline.metrics);
+  renderDetailPerfPanel(pipeline.metrics);
 }
 
 function resetPipelineUI() {
@@ -1430,16 +1596,27 @@ async function runCorrection() {
   if (!llmModelReady) setLlmProgress(t('llm.loadingFirst'));
   showToast(t('toast.improving'));
 
+  const metricsRun = createMetricsRun({ phase: 'correction' });
+  activeLlmMetricsRun = metricsRun;
+
   try {
     const rules = await correctionMemory.getActiveRules({ specialty: null });
     const ruleApplications = [];
     const protectedAll = [];
-    const inputSegments = pipeline.raw.segments.map((seg) => {
-      const { text, applied, protectedTerms } = correctionMemory.applyLocalCorrectionRules(seg.text, rules);
-      for (const a of applied) ruleApplications.push({ ...a, segment_id: seg.id, at: new Date().toISOString() });
-      for (const p of protectedTerms) protectedAll.push(p);
-      return { id: seg.id, text, asrConfidence: seg.asrConfidence };
+    const inputSegments = measureStepSync(metricsRun, 'localRules', t('perf.stepLocalRules'), () => {
+      return pipeline.raw.segments.map((seg) => {
+        const { text, applied, protectedTerms } = correctionMemory.applyLocalCorrectionRules(seg.text, rules);
+        for (const a of applied) ruleApplications.push({ ...a, segment_id: seg.id, at: new Date().toISOString() });
+        for (const p of protectedTerms) protectedAll.push(p);
+        return { id: seg.id, text, asrConfidence: seg.asrConfidence };
+      });
+    }, {
+      rulesApplied: 0,
+      transcriptUtf8: utf8ByteLength(pipeline.raw.text),
     });
+    const localStep = metricsRun.steps[metricsRun.steps.length - 1];
+    if (localStep) localStep.spaceBytes.rulesApplied = ruleApplications.length;
+
     pipeline.ruleApplications = ruleApplications;
     const protectedTerms = dedupeProtected(protectedAll);
     const knownTerms = findKnownTerms(inputSegments.map((s) => s.text).join(' '));
@@ -1451,25 +1628,42 @@ async function runCorrection() {
         ? t('status.correctionPart', { current: i + 1, total: windows.length })
         : t('status.improving');
       setLlmProgress(label, windows.length > 1 ? i / windows.length : undefined);
-      const wr = await correctInWorker(windows[i], protectedTerms, knownTerms);
+      const msg = await correctInWorker(windows[i], protectedTerms, knownTerms);
       if (!auth.isUnlocked()) return;
-      windowResults.push(wr);
+      windowResults.push(msg.result);
+      const stepLabel = windows.length > 1
+        ? t('perf.stepLlmCorrectWindow', { current: i + 1, total: windows.length })
+        : t('perf.stepLlmCorrect');
+      recordStep(metricsRun, 'llmCorrect', stepLabel, {
+        durationMs: msg.metrics?.durationMs,
+        spaceBytes: msg.metrics?.spaceBytes || {},
+        memory: msg.metrics?.memory,
+        meta: { windowIndex: i + 1 },
+      });
       if (windows.length > 1) {
         setLlmProgress(t('status.correctionPartDone', { current: i + 1, total: windows.length }), (i + 1) / windows.length);
       }
     }
 
-    const merged = mergeCorrectionResults(windows, windowResults, inputSegments);
-    const extraConflicts = detectBoundaryConflicts(merged.segments, windows);
-    const boundaryConflicts = [
-      ...(merged.boundaryConflicts || []),
-      ...extraConflicts,
-    ];
-    const result = {
-      corrected_transcript: merged.corrected_transcript,
-      segments: merged.segments,
-      global_warnings: merged.global_warnings,
-    };
+    const mergeOutcome = measureStepSync(metricsRun, 'mergeAndAnnotate', t('perf.stepMergeAnnotate'), () => {
+      const merged = mergeCorrectionResults(windows, windowResults, inputSegments);
+      const extraConflicts = detectBoundaryConflicts(merged.segments, windows);
+      const boundaryConflicts = [
+        ...(merged.boundaryConflicts || []),
+        ...extraConflicts,
+      ];
+      const result = {
+        corrected_transcript: merged.corrected_transcript,
+        segments: merged.segments,
+        global_warnings: merged.global_warnings,
+      };
+      const annotations = annotateTranscriptUncertainty(inputSegments, result.segments);
+      return { result, boundaryConflicts, annotations };
+    }, {
+      transcriptUtf8: utf8ByteLength(windowResults.map((r) => r.corrected_transcript || '').join(' ')),
+    });
+
+    const { result, boundaryConflicts, annotations } = mergeOutcome;
     if (!auth.isUnlocked()) return;
 
     pipeline.correction = {
@@ -1482,11 +1676,16 @@ async function runCorrection() {
         chunked: windows.length > 1,
       },
     };
-    pipeline.annotations = annotateTranscriptUncertainty(inputSegments, result.segments);
+    pipeline.annotations = annotations;
     pipeline.edits = {};
     pipeline.finalTranscript = null;
     pipeline.editLog = null;
     pipeline.form = null;
+
+    finalizeRun(metricsRun);
+    currentMetrics = mergeMetrics(pipeline.metrics || currentMetrics, 'correction', metricsRun);
+    pipeline.metrics = currentMetrics;
+    applyMetrics(currentMetrics);
 
     reviewPanel.classList.remove('hidden');
     reviewUI.render(pipeline);
@@ -1498,6 +1697,7 @@ async function runCorrection() {
     if (!auth.isUnlocked()) return;
     handleLlmError(err);
   } finally {
+    activeLlmMetricsRun = null;
     isExtracting = false;
     updateBusyButtons();
   }
@@ -1522,17 +1722,31 @@ async function runGenerateForm() {
   isExtracting = true;
   updateBusyButtons();
 
-  const final = generateFinalReviewedTranscript(pipeline.correction.segments, pipeline.edits);
+  const metricsRun = createMetricsRun({ phase: 'form' });
+  activeLlmMetricsRun = metricsRun;
+
+  const final = measureStepSync(metricsRun, 'buildFinalTranscript', t('perf.stepBuildFinal'), () => {
+    return generateFinalReviewedTranscript(pipeline.correction.segments, pipeline.edits);
+  }, {
+    transcriptUtf8: utf8ByteLength(
+      pipeline.correction.segments.map((s) => s.corrected_text || s.text || '').join(' '),
+    ),
+  });
   pipeline.finalTranscript = final;
   pipeline.editLog = buildEditLog(pipeline.correction.segments, pipeline.edits, pipeline.ruleApplications);
 
   formPanel.classList.remove('hidden');
   setFormPanelStatus('loading', t('form.loading'));
-  formReviewRoot.innerHTML = '<p class="empty-state loading">' + escapeHtml(t('form.extracting')) + '</p>';
+  formReviewUI.showLoading(t('form.extracting'));
   if (!llmModelReady) setLlmProgress(t('llm.loading'));
 
   try {
-    const { data, truncated } = await extractInWorker(final.text, final.segments, schema);
+    const { data, truncated, metrics: extractMetrics } = await extractInWorker(final.text, final.segments, schema);
+    recordStep(metricsRun, 'llmExtract', t('perf.stepLlmExtract'), {
+      durationMs: extractMetrics?.durationMs,
+      spaceBytes: extractMetrics?.spaceBytes || {},
+      memory: extractMetrics?.memory,
+    });
     if (!auth.isUnlocked()) return;
     pipeline.form = {
       fields: data.fields,
@@ -1540,6 +1754,12 @@ async function runGenerateForm() {
       overallWarnings: data.overall_warnings,
       approvedAt: null,
     };
+
+    finalizeRun(metricsRun);
+    currentMetrics = mergeMetrics(pipeline.metrics || currentMetrics, 'form', metricsRun);
+    pipeline.metrics = currentMetrics;
+    applyMetrics(currentMetrics);
+
     formReviewUI.render(pipeline);
     const filledCount = data.fields.filter((f) => f.value && f.value !== 'niet vermeld').length;
     setFormPanelStatus(
@@ -1555,9 +1775,10 @@ async function runGenerateForm() {
     if (!auth.isUnlocked()) return;
     const errMsg = err.message || 'unknown error';
     setFormPanelStatus('error', t('form.fillFailed', { error: errMsg }));
-    formReviewRoot.innerHTML = '<p class="empty-state error">' + escapeHtml(t('form.fillFailedShort', { error: errMsg })) + '</p>';
+    formReviewUI.showError(t('form.fillFailedShort', { error: errMsg }));
     handleLlmError(err);
   } finally {
+    activeLlmMetricsRun = null;
     isExtracting = false;
     updateBusyButtons();
   }
@@ -1816,10 +2037,8 @@ function refreshDynamicUI() {
   if (pipeline?.correction) reviewUI.render(pipeline);
   else if (!pipeline) reviewUI.clear();
   if (pipeline?.form) formReviewUI.render(pipeline);
-  else if (!pipeline?.form && !formReviewRoot.querySelector('.tform-field')) {
-    const empty = document.getElementById('formReviewEmpty');
-    if (empty) empty.textContent = t('form.empty');
-    else formReviewRoot.innerHTML = '<p class="empty-state">' + escapeHtml(t('form.empty')) + '</p>';
+  else if (!formReviewRoot.querySelector('.tform-field')) {
+    formReviewUI.clear();
   }
   if (!modelReady && !pendingLoad) {
     modelStatus.textContent = t('engine.notLoaded');
@@ -1827,6 +2046,8 @@ function refreshDynamicUI() {
   initLlmSupport();
   if (llmSupported && !isExtracting) llmStatus.textContent = llmModelReady ? t('llm.ready') : t('llm.status');
   updateBusyButtons();
+  renderPerfPanel(pipeline?.metrics || currentMetrics);
+  renderDetailPerfPanel(currentDetailTranscript?.metrics || pipeline?.metrics || currentMetrics);
 }
 
 langToggleBtn?.addEventListener('click', () => toggleLang());

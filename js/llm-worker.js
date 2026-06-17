@@ -9,13 +9,14 @@
 // Messages in:  { type: 'correct', id, window?, segments?, protectedTerms, knownTerms }
 //               { type: 'extract', id, transcript, segments, schema }
 // Messages out: { type: 'progress', text, progress }   // progress is 0..1
-//               { type: 'ready', modelId }
-//               { type: 'complete', id, task, ...result }
+//               { type: 'ready', modelId, metrics? }
+//               { type: 'complete', id, task, ...result, metrics? }
 //               { type: 'error', id?, message }
 
 import * as webllm from 'https://esm.run/@mlc-ai/web-llm@0.2.84';
 import { requestWebGpuAdapter, WEBGPU_ADAPTER_ERROR } from './webgpu-probe.js';
 import { EXTRACT_MAX_TRANSCRIPT_CHARS } from './config.js';
+import { normalizeSegmentId } from './final-transcript.js';
 
 const MODEL_ID = 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC';
 // A smaller context window keeps GPU memory use down on weaker adapters (some
@@ -25,6 +26,31 @@ const CONTEXT_WINDOW = 4096;
 
 let engine = null;
 let enginePromise = null;
+const utf8Encoder = new TextEncoder();
+
+function heapSnapshot() {
+  const mem = performance.memory;
+  if (!mem || typeof mem.usedJSHeapSize !== 'number') return null;
+  return mem.usedJSHeapSize;
+}
+
+function buildMetrics(t0, memBefore, spaceBytes = {}) {
+  const memAfter = heapSnapshot();
+  return {
+    durationMs: performance.now() - t0,
+    spaceBytes,
+    memory: {
+      available: memBefore != null || memAfter != null,
+      heapUsedBefore: memBefore,
+      heapUsedAfter: memAfter,
+      heapDelta: (memBefore != null && memAfter != null) ? memAfter - memBefore : null,
+    },
+  };
+}
+
+function utf8Len(str) {
+  return utf8Encoder.encode(String(str || '')).length;
+}
 
 // Tolerant JSON parsing: we no longer constrain decoding with a Web-LLM grammar
 // (its JSON-schema compiler can crash on some GPUs and the constrained decoding
@@ -90,6 +116,8 @@ async function chatWithRetry(params) {
 async function ensureEngine() {
   if (engine) return engine;
   if (!enginePromise) {
+    const t0 = performance.now();
+    const memBefore = heapSnapshot();
     enginePromise = (async () => {
       if (!self.navigator || !('gpu' in self.navigator)) {
         throw new Error('WebGPU is not available in this browser.');
@@ -111,7 +139,8 @@ async function ensureEngine() {
         },
         { context_window_size: CONTEXT_WINDOW },
       );
-      self.postMessage({ type: 'ready', modelId: MODEL_ID });
+      const loadMetrics = buildMetrics(t0, memBefore);
+      self.postMessage({ type: 'ready', modelId: MODEL_ID, metrics: loadMetrics });
       return eng;
     })();
     // Allow retrying after a failed load (e.g. interrupted download).
@@ -281,6 +310,8 @@ function failedCorrectionFallback(segs) {
 }
 
 async function correct({ id, window, segments, protectedTerms, knownTerms }) {
+  const t0 = performance.now();
+  const memBefore = heapSnapshot();
   const target = window ? (window.target || []) : (Array.isArray(segments) ? segments : []);
   if (!target.length) {
     self.postMessage({
@@ -288,18 +319,24 @@ async function correct({ id, window, segments, protectedTerms, knownTerms }) {
       id,
       task: 'correct',
       result: { corrected_transcript: '', segments: [], global_warnings: [], failed: false },
+      metrics: buildMetrics(t0, memBefore),
     });
     return;
   }
 
+  const messages = buildCorrectionMessages({ window, segments: target, protectedTerms, knownTerms });
+  let promptUtf8 = 0;
+  for (const m of messages) promptUtf8 += utf8Len(m.content);
+
   let parsed = null;
+  let content = '';
   try {
     const response = await chatWithRetry({
-      messages: buildCorrectionMessages({ window, segments: target, protectedTerms, knownTerms }),
+      messages,
       temperature: 0,
       max_tokens: correctionMaxTokens(target.length),
     });
-    const content = response?.choices?.[0]?.message?.content || '';
+    content = response?.choices?.[0]?.message?.content || '';
     parsed = parseJsonLoose(content);
   } catch (err) {
     if (isFatalGpuError(err)) throw err;
@@ -310,7 +347,11 @@ async function correct({ id, window, segments, protectedTerms, knownTerms }) {
     ? { ...normalizeCorrection(parsed, target), failed: false }
     : failedCorrectionFallback(target);
 
-  self.postMessage({ type: 'complete', id, task: 'correct', result });
+  const metrics = buildMetrics(t0, memBefore, {
+    promptUtf8,
+    responseUtf8: utf8Len(content),
+  });
+  self.postMessage({ type: 'complete', id, task: 'correct', result, metrics });
 }
 
 function buildMessages(numberedTranscript, fieldNames, fieldHints) {
@@ -353,7 +394,7 @@ function normalizeForm(parsed, fieldNames, segmentById) {
     let value = (f.value === null || f.value === undefined) ? '' : String(f.value);
     const empty = !value.trim() || /^niet vermeld$/i.test(value.trim());
     if (empty) value = 'niet vermeld';
-    const sid = typeof f.source_segment_id === 'string' ? f.source_segment_id : '';
+    const sid = normalizeSegmentId(typeof f.source_segment_id === 'string' ? f.source_segment_id : '');
     const seg = sid && segmentById ? segmentById.get(sid) : null;
     const source_sentence = seg ? String(seg.text || '') : '';
     return {
@@ -380,6 +421,8 @@ function extractMaxTokens(fieldCount) {
 }
 
 async function extract({ id, transcript, segments, schema }) {
+  const t0 = performance.now();
+  const memBefore = heapSnapshot();
   const fieldNames = schema && schema.properties ? Object.keys(schema.properties) : [];
   const fieldHints = {};
   for (const name of fieldNames) {
@@ -402,8 +445,12 @@ async function extract({ id, transcript, segments, schema }) {
     truncated = true;
   }
 
+  const messages = buildMessages(numbered, fieldNames, fieldHints);
+  let promptUtf8 = 0;
+  for (const m of messages) promptUtf8 += utf8Len(m.content);
+
   const response = await chatWithRetry({
-    messages: buildMessages(numbered, fieldNames, fieldHints),
+    messages,
     temperature: 0,
     max_tokens: extractMaxTokens(fieldNames.length),
   });
@@ -413,7 +460,13 @@ async function extract({ id, transcript, segments, schema }) {
     throw new Error('The model returned invalid JSON. Please try again.');
   }
   const data = normalizeForm(parsed, fieldNames, segmentById);
-  self.postMessage({ type: 'complete', id, task: 'extract', data, truncated });
+  const metrics = buildMetrics(t0, memBefore, {
+    promptUtf8,
+    responseUtf8: utf8Len(content),
+    fieldCount: fieldNames.length,
+    transcriptUtf8: utf8Len(numbered),
+  });
+  self.postMessage({ type: 'complete', id, task: 'extract', data, truncated, metrics });
 }
 
 // Serialize jobs: the engine handles one request at a time.

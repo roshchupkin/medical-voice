@@ -391,6 +391,16 @@
     .tform-flag.inferred { background: var(--bg); color: var(--text-muted); }
     .tform-value { width: 100%; min-height: 48px; border-radius: var(--radius-sm); border: 1px solid var(--border); padding: 0.5rem; font-family: inherit; font-size: 0.9rem; resize: vertical; }
     .tform-warning { font-size: 0.82rem; color: var(--danger); margin: 0.3rem 0; }
+    .tform-source-teaser {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin: 0.35rem 0 0;
+      line-height: 1.4;
+      border-left: 3px solid var(--border);
+      padding-left: 0.5rem;
+    }
+    .tform-source-seg { font-weight: 600; color: var(--text); }
+    .tform-source-btn { margin-top: 0.35rem; font-weight: 600; }
     .tform-source { margin-top: 0.4rem; background: var(--bg); border-radius: var(--radius-sm); padding: 0.5rem; }
     .trace-row { display: grid; grid-template-columns: 160px 1fr; gap: 0.5rem; font-size: 0.85rem; padding: 0.15rem 0; }
     .trace-label { color: var(--text-muted); font-weight: 600; }
@@ -407,6 +417,34 @@
     .form-panel-status.success { background: #d1f7e0; border: 1px solid #28a745; color: #14692d; }
     .form-panel-status.error { background: #f8d7da; border: 1px solid var(--danger); color: #842029; }
     .panel-attention { box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.35); }
+    /* Performance metrics panel */
+    .perf-panel {
+      margin-top: 0.75rem;
+      padding: 0.5rem 0.75rem;
+      background: var(--card);
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border, #dee2e6);
+      font-size: 0.88rem;
+    }
+    .perf-panel.hidden { display: none; }
+    .perf-panel summary {
+      cursor: pointer;
+      font-weight: 600;
+      color: var(--text);
+      user-select: none;
+    }
+    .perf-panel .perf-note { margin: 0.5rem 0 0; font-size: 0.82rem; }
+    .perf-phase { margin-top: 0.75rem; }
+    .perf-phase-title { margin: 0 0 0.35rem; font-size: 0.9rem; font-weight: 600; }
+    .perf-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    .perf-table th, .perf-table td {
+      text-align: left;
+      padding: 0.25rem 0.5rem;
+      border-bottom: 1px solid var(--border, #dee2e6);
+      vertical-align: top;
+    }
+    .perf-table th { font-weight: 600; color: var(--text-muted); }
+    .detail-perf-panel { margin-top: 1rem; }
     /* Toast */
     .toast {
       position: fixed;
@@ -552,6 +590,11 @@
           <button type="button" id="downloadBtn" disabled data-i18n="transcribe.download">Download .txt</button>
           <button type="button" id="reviewBtn" disabled data-i18n-title="transcribe.improveReviewTitle" title="Verbeter de transcriptie en beoordeel onzekere passages voordat u het formulier invult" data-i18n="transcribe.improveReview">Verbeteren &amp; beoordelen</button>
         </div>
+        <details class="perf-panel hidden" id="perfPanel">
+          <summary data-i18n="perf.title">Prestaties</summary>
+          <div id="perfPanelBody"></div>
+          <p class="hint perf-note" data-i18n="perf.gpuNote">Geheugen toont alleen JavaScript-heap (Chrome/Edge). GPU-VRAM is niet meetbaar in de browser.</p>
+        </details>
       </div>
 
       <!-- Section B: Saved transcripts -->
@@ -576,6 +619,11 @@
             <a id="detailDownloadAudioLink" class="button-as-link" href="#" download="recording.webm" style="display:inline-block; margin-top:0.5rem;" data-i18n="saved.downloadAudio">Audio downloaden</a>
           </div>
           <div class="detail-content" id="detailContent"></div>
+          <details class="perf-panel detail-perf-panel hidden" id="detailPerfPanel">
+            <summary data-i18n="perf.title">Prestaties</summary>
+            <div id="detailPerfPanelBody"></div>
+            <p class="hint perf-note" data-i18n="perf.gpuNote">Geheugen toont alleen JavaScript-heap (Chrome/Edge). GPU-VRAM is niet meetbaar in de browser.</p>
+          </details>
           <textarea class="detail-edit-area hidden" id="detailEditArea"></textarea>
           <div class="detail-actions">
             <button type="button" id="detailEditBtn" data-i18n="saved.edit">Bewerken</button>

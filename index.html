@@ -259,6 +259,15 @@
       grid-template-columns: 1fr 1fr;
       gap: 1.5rem;
     }
+    .form-grid.template-collapsed {
+      grid-template-columns: 1fr;
+    }
+    .form-grid.template-collapsed .form-template-col {
+      display: none;
+    }
+    .form-grid.template-collapsed .form-filled-col {
+      grid-column: 1;
+    }
     @media (max-width: 700px) {
       .form-grid { grid-template-columns: 1fr; }
     }
@@ -292,6 +301,93 @@
     .template-field-row .field-hint { flex: 2; min-width: 0; }
     .template-field-row button { padding: 0.35rem 0.6rem; font-size: 0.85rem; flex-shrink: 0; }
     .template-actions { margin-top: 0.75rem; }
+    .template-collapsible summary {
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.95rem;
+      margin-bottom: 0.6rem;
+    }
+    .template-panel { margin-top: 0.5rem; }
+    .template-select-row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem; align-items: center; }
+    .template-select-row select {
+      flex: 1;
+      min-width: 160px;
+      padding: 0.45rem 0.6rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      font-family: inherit;
+      font-size: 0.9rem;
+    }
+    .template-lib-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+    .template-lib-actions button { padding: 0.35rem 0.6rem; font-size: 0.85rem; }
+    .template-fields-editor summary { cursor: pointer; font-weight: 600; font-size: 0.88rem; margin: 0.5rem 0; }
+    .template-field-row .field-move { padding: 0.2rem 0.4rem; font-size: 0.75rem; }
+    .form-actions-sticky {
+      position: sticky;
+      bottom: 0;
+      background: var(--card);
+      padding: 0.5rem 0;
+      z-index: 2;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      align-items: center;
+    }
+    .form-mode-group { display: inline-flex; gap: 0.25rem; }
+    .form-mode-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .form-copy-wrap { position: relative; display: inline-block; }
+    .form-copy-menu {
+      position: absolute;
+      bottom: 100%;
+      left: 0;
+      margin-bottom: 0.25rem;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      display: flex;
+      flex-direction: column;
+      min-width: 160px;
+      z-index: 5;
+    }
+    .form-copy-menu.hidden { display: none; }
+    .form-copy-menu button {
+      text-align: left;
+      border: none;
+      border-radius: 0;
+      background: transparent;
+      padding: 0.45rem 0.75rem;
+    }
+    .form-copy-menu button:hover { background: var(--bg); }
+    .form-summary-field {
+      margin-bottom: 0.75rem;
+      padding: 0.65rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--card);
+    }
+    .form-summary-field.needs-review { border-color: var(--danger); background: #fff8f8; }
+    .form-summary-field.empty-value .form-summary-value { color: var(--text-muted); font-style: italic; }
+    .form-summary-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.35rem; }
+    .form-summary-label { font-size: 0.88rem; }
+    .form-summary-flags { display: flex; gap: 0.3rem; margin-left: auto; }
+    .form-summary-value { font-size: 0.92rem; line-height: 1.45; white-space: pre-wrap; }
+    .form-summary-template { font-size: 0.82rem; color: var(--text-muted); margin: 0 0 0.75rem; }
+    .form-copy-field-btn { font-size: 0.8rem; margin-top: 0.35rem; padding: 0.2rem 0; }
+    .tform-flag.empty-flag { background: var(--bg); color: var(--text-muted); }
+    .badge.form { background: #e8f4fd; border: 1px solid #b6d4fe; color: #084298; font-size: 0.72rem; padding: 0.05rem 0.4rem; border-radius: 999px; margin-left: 0.35rem; }
+    .badge.approved { background: #d1f7e0; border: 1px solid #28a745; color: #14692d; font-size: 0.72rem; padding: 0.05rem 0.4rem; border-radius: 999px; margin-left: 0.25rem; }
+    .detail-form-preview {
+      margin: 0.75rem 0;
+      padding: 0.75rem 1rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-size: 0.9rem;
+    }
+    .detail-form-preview.hidden { display: none; }
+    .detail-form-preview-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.35rem; }
+    .detail-form-preview-head strong { font-size: 0.92rem; }
+    .detail-form-preview-meta { color: var(--text-muted); font-size: 0.85rem; }
     .form-field { margin-bottom: 0.85rem; }
     .form-field label {
       display: block;
@@ -619,6 +715,14 @@
             <a id="detailDownloadAudioLink" class="button-as-link" href="#" download="recording.webm" style="display:inline-block; margin-top:0.5rem;" data-i18n="saved.downloadAudio">Audio downloaden</a>
           </div>
           <div class="detail-content" id="detailContent"></div>
+          <div class="detail-form-preview hidden" id="detailFormPreview">
+            <div class="detail-form-preview-head">
+              <strong data-i18n="form.previewTitle">Medisch formulier</strong>
+              <span class="badge approved hidden" id="detailFormApprovedBadge" data-i18n="form.badgeApproved">Goedgekeurd</span>
+            </div>
+            <p class="detail-form-preview-meta" id="detailFormPreviewMeta"></p>
+            <button type="button" id="detailViewFormBtn" data-i18n="form.viewForm">Bekijk formulier</button>
+          </div>
           <details class="perf-panel detail-perf-panel hidden" id="detailPerfPanel">
             <summary data-i18n="perf.title">Prestaties</summary>
             <div id="detailPerfPanelBody"></div>
@@ -654,17 +758,38 @@
     <div class="panel form-panel hidden" id="formPanel">
       <h2 data-i18n="form.title">Stap 3 — Medisch formulier</h2>
       <div id="formPanelStatus" class="form-panel-status hidden" aria-live="polite"></div>
-      <div class="form-grid">
-        <div>
-          <h3 data-i18n="form.templateTitle">Formuliervelden (sjabloon)</h3>
-          <div id="templateFields"></div>
-          <div class="row template-actions">
-            <button type="button" id="addFieldBtn" data-i18n="form.addField">Veld toevoegen</button>
-            <button type="button" id="resetTemplateBtn" data-i18n="form.resetTemplate">Standaard herstellen</button>
-          </div>
-          <p class="hint" data-i18n="form.templateHint">Definieer welke velden de AI uit de beoordeelde transcriptie moet invullen. De hint vertelt het model wat te extraheren. Wijzigingen worden automatisch opgeslagen.</p>
+      <div class="form-grid" id="formGrid">
+        <div class="form-template-col" id="formTemplateCol">
+          <details class="template-collapsible" id="templateCollapsible" open>
+            <summary data-i18n="form.templateTitle">Formuliervelden (sjabloon)</summary>
+            <div class="template-panel">
+              <div class="template-select-row">
+                <label class="sr-only" for="templateSelect" data-i18n="form.selectTemplate">Kies sjabloon</label>
+                <select id="templateSelect"></select>
+                <button type="button" id="applyTemplateBtn" data-i18n="form.applyTemplate">Toepassen</button>
+              </div>
+              <div class="template-lib-actions">
+                <button type="button" id="saveTemplateLibBtn" data-i18n="form.saveToLibrary">Opslaan in bibliotheek</button>
+                <button type="button" id="duplicateTemplateBtn" data-i18n="form.duplicateTemplate">Dupliceren</button>
+                <button type="button" id="renameTemplateBtn" data-i18n="form.renameTemplate">Hernoemen</button>
+                <button type="button" id="deleteTemplateBtn" class="danger" data-i18n="form.deleteTemplate">Verwijderen</button>
+                <button type="button" id="exportTemplateBtn" data-i18n="form.exportTemplate">Exporteer sjabloon</button>
+                <button type="button" id="importTemplateBtn" data-i18n="form.importTemplate">Importeer sjabloon</button>
+                <input type="file" id="importTemplateInput" accept=".json,application/json" class="hidden" style="display:none;">
+              </div>
+              <details class="template-fields-editor" id="templateFieldsEditor" open>
+                <summary data-i18n="form.editFields">Velden bewerken</summary>
+                <div id="templateFields"></div>
+                <div class="row template-actions">
+                  <button type="button" id="addFieldBtn" data-i18n="form.addField">Veld toevoegen</button>
+                  <button type="button" id="resetTemplateBtn" data-i18n="form.resetTemplate">Standaard herstellen</button>
+                </div>
+              </details>
+              <p class="hint" data-i18n="form.templateHint">Definieer welke velden de AI uit de beoordeelde transcriptie moet invullen. De hint vertelt het model wat te extraheren. Wijzigingen worden automatisch opgeslagen.</p>
+            </div>
+          </details>
         </div>
-        <div>
+        <div class="form-filled-col">
           <h3 data-i18n="form.filledTitle">Ingevuld formulier</h3>
           <div id="formReviewRoot"><p class="empty-state" id="formReviewEmpty">Beoordeel de transcriptie en klik op "Genereer formulier" om deze velden met brontraceerbaarheid in te vullen.</p></div>
         </div>

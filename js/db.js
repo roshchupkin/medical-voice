@@ -215,6 +215,35 @@ export async function saveFormTemplate(fields) {
   return fields;
 }
 
+// --- Form template library (built-in + custom templates, per user) ---
+// Stored shape: { key: 'formTemplateLibrary:<userId>', iv, ciphertext }
+// Decrypted: { activeTemplateId, custom: [{ id, name, category, fields, ... }] }
+
+function templateLibraryKey(userId) {
+  return 'formTemplateLibrary:' + userId;
+}
+
+export async function getFormTemplateLibrary() {
+  const { userId } = getSession();
+  const db = await openDb();
+  const row = await tx(db, 'settings', 'readonly', (store) => store.get(templateLibraryKey(userId)));
+  if (!row || !row.ciphertext) return null;
+  try {
+    return await decryptJSON(row.iv, row.ciphertext);
+  } catch (e) {
+    console.warn('Could not decrypt form template library', e);
+    return null;
+  }
+}
+
+export async function saveFormTemplateLibrary(state) {
+  const { userId } = getSession();
+  const db = await openDb();
+  const { iv, ciphertext } = await encryptJSON(state);
+  await tx(db, 'settings', 'readwrite', (store) => store.put({ key: templateLibraryKey(userId), iv, ciphertext }));
+  return state;
+}
+
 // --- Legacy migration ---
 // Records written before the login feature have no `owner` field and are
 // plaintext. On the first login after the upgrade, they are encrypted under

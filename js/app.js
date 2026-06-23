@@ -17,6 +17,8 @@ import { annotateTranscriptUncertainty } from './uncertainty.js';
 import { generateFinalReviewedTranscript, buildEditLog } from './final-transcript.js';
 import { createReviewUI } from './review-ui.js';
 import { createFormReviewUI, exportFinalForm, normalizePipelineForm } from './form-review-ui.js';
+import { copyFormToClipboard, copyFieldToClipboard, downloadFormTxt, formatFormLabeled } from './form-export.js';
+import * as formTemplates from './form-templates.js';
 import { assertFormGenerationAllowed } from './safety.js';
 import { probeWebGpuAvailable } from './webgpu-probe.js';
 import { t, applyStatic, onLangChange, toggleLang, getDefaultTemplate, getLang } from './i18n.js';
@@ -83,6 +85,21 @@ const llmProgressBar = document.getElementById('llmProgressBar');
 const templateFieldsEl = document.getElementById('templateFields');
 const addFieldBtn = document.getElementById('addFieldBtn');
 const resetTemplateBtn = document.getElementById('resetTemplateBtn');
+const formGrid = document.getElementById('formGrid');
+const templateCollapsible = document.getElementById('templateCollapsible');
+const templateSelect = document.getElementById('templateSelect');
+const applyTemplateBtn = document.getElementById('applyTemplateBtn');
+const saveTemplateLibBtn = document.getElementById('saveTemplateLibBtn');
+const duplicateTemplateBtn = document.getElementById('duplicateTemplateBtn');
+const renameTemplateBtn = document.getElementById('renameTemplateBtn');
+const deleteTemplateBtn = document.getElementById('deleteTemplateBtn');
+const exportTemplateBtn = document.getElementById('exportTemplateBtn');
+const importTemplateBtn = document.getElementById('importTemplateBtn');
+const importTemplateInput = document.getElementById('importTemplateInput');
+const detailFormPreview = document.getElementById('detailFormPreview');
+const detailFormPreviewMeta = document.getElementById('detailFormPreviewMeta');
+const detailFormApprovedBadge = document.getElementById('detailFormApprovedBadge');
+const detailViewFormBtn = document.getElementById('detailViewFormBtn');
 const reviewPanel = document.getElementById('reviewPanel');
 const reviewRoot = document.getElementById('reviewRoot');
 const formPanel = document.getElementById('formPanel');
@@ -126,6 +143,38 @@ function debounce(fn, ms) {
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => { timer = null; fn(...args); }, ms);
   };
+}
+
+function setFormGridCollapsed(collapsed) {
+  if (formGrid) formGrid.classList.toggle('template-collapsed', collapsed);
+  if (templateCollapsible && collapsed) templateCollapsible.open = false;
+}
+
+function renderDetailFormPreview(entry) {
+  if (!detailFormPreview) return;
+  const form = normalizePipelineForm(entry?.form);
+  if (!form || !form.fields?.length) {
+    detailFormPreview.classList.add('hidden');
+    return;
+  }
+  detailFormPreview.classList.remove('hidden');
+  let meta = t('form.previewFields', { count: form.fields.length });
+  if (form.templateName) meta += ' · ' + form.templateName;
+  if (form.approvedAt) {
+    meta += ' · ' + t('form.previewApproved', { date: new Date(form.approvedAt).toLocaleString() });
+    detailFormApprovedBadge?.classList.remove('hidden');
+  } else {
+    meta += ' · ' + t('form.previewNotApproved');
+    detailFormApprovedBadge?.classList.add('hidden');
+  }
+  if (detailFormPreviewMeta) detailFormPreviewMeta.textContent = meta;
+}
+
+function updateTemplateManageButtons() {
+  const meta = formTemplates.getActiveTemplateMeta();
+  const isBuiltin = meta.builtin;
+  if (renameTemplateBtn) renameTemplateBtn.disabled = isBuiltin;
+  if (deleteTemplateBtn) deleteTemplateBtn.disabled = isBuiltin;
 }
 
 function renderPerfPanel(metrics = currentMetrics) {
@@ -937,9 +986,15 @@ function renderSavedList(items) {
     }
     const untitled = t('saved.untitled');
     const draftLabel = t('saved.draft');
+    const normForm = normalizePipelineForm(item.form);
+    let formBadges = '';
+    if (normForm && normForm.fields?.length) {
+      formBadges += `<span class="badge form">${t('form.badgeForm')}</span>`;
+      if (normForm.approvedAt) formBadges += `<span class="badge approved">${t('form.badgeApproved')}</span>`;
+    }
     return `
     <li data-id="${item.id}">
-      <span class="item-title" title="${escapeHtml(item.title || untitled)}">${escapeHtml(item.title || untitled)}${isDraft ? `<span class="badge draft">${draftLabel}</span>` : ''}${draftMeta}</span>
+      <span class="item-title" title="${escapeHtml(item.title || untitled)}">${escapeHtml(item.title || untitled)}${isDraft ? `<span class="badge draft">${draftLabel}</span>` : ''}${formBadges}${draftMeta}</span>
       <span class="item-date">${formatDate(item.createdAt)}</span>
       <span class="item-actions">
         <button type="button" class="open-btn">${t('saved.open')}</button>
@@ -1026,6 +1081,7 @@ async function openTranscript(id) {
       renderPerfPanel(entry.metrics);
       renderDetailPerfPanel(entry.metrics);
     }
+    renderDetailFormPreview(entry);
     detailPanel.classList.remove('hidden');
     updateBusyButtons();
   } catch (e) {
@@ -1051,9 +1107,20 @@ async function removeTranscript(id) {
 backToListBtn.addEventListener('click', () => {
   detailPanel.classList.add('hidden');
   currentDetailTranscript = null;
+  if (detailFormPreview) detailFormPreview.classList.add('hidden');
   exitEditMode();
   updateBusyButtons();
 });
+
+if (detailViewFormBtn) {
+  detailViewFormBtn.addEventListener('click', () => {
+    if (!pipeline?.form) return;
+    formPanel.classList.remove('hidden');
+    setFormGridCollapsed(true);
+    formReviewUI.setMode('summary');
+    formPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
 
 // --- Detail: edit / rename / download ---
 detailEditBtn.addEventListener('click', () => {
@@ -1258,19 +1325,84 @@ modelSelect.addEventListener('change', () => {
 // Medical form filling (local LLM via Web-LLM, see js/llm-worker.js)
 // =====================================================================
 
-let templateFields = getDefaultTemplate().map(f => ({ ...f }));
+let templateFields = getDefaultTemplate().map((f) => ({ ...f }));
 
-// --- Template editor ---
+function syncTemplateFieldsFromLibrary() {
+  templateFields = formTemplates.getActiveFields();
+  renderTemplateEditor();
+  renderTemplateSelect();
+  updateTemplateManageButtons();
+}
+
 const persistTemplate = debounce(() => {
   if (!auth.isUnlocked()) return;
-  db.saveFormTemplate(templateFields).catch(() => showToast(t('toast.templateSaveFailed')));
+  formTemplates.setActiveFields(templateFields).catch(() => showToast(t('toast.templateSaveFailed')));
 }, 600);
+
+function renderTemplateSelect() {
+  if (!templateSelect) return;
+  const activeId = formTemplates.getActiveTemplateId();
+  const { builtins, custom } = formTemplates.listAllTemplates();
+  templateSelect.innerHTML = '';
+  const builtinGroup = document.createElement('optgroup');
+  builtinGroup.label = t('templates.builtinGroup');
+  for (const tpl of builtins) {
+    const opt = document.createElement('option');
+    opt.value = tpl.id;
+    opt.textContent = `${tpl.name} (${tpl.category})`;
+    if (tpl.id === activeId) opt.selected = true;
+    builtinGroup.appendChild(opt);
+  }
+  templateSelect.appendChild(builtinGroup);
+  if (custom.length) {
+    const customGroup = document.createElement('optgroup');
+    customGroup.label = t('templates.catCustom');
+    for (const tpl of custom) {
+      const opt = document.createElement('option');
+      opt.value = tpl.id;
+      opt.textContent = tpl.name;
+      if (tpl.id === activeId) opt.selected = true;
+      customGroup.appendChild(opt);
+    }
+    templateSelect.appendChild(customGroup);
+  }
+}
 
 function renderTemplateEditor() {
   templateFieldsEl.innerHTML = '';
   templateFields.forEach((field, i) => {
     const row = document.createElement('div');
     row.className = 'template-field-row';
+
+    const moveUpBtn = document.createElement('button');
+    moveUpBtn.type = 'button';
+    moveUpBtn.className = 'field-move';
+    moveUpBtn.textContent = '↑';
+    moveUpBtn.title = t('form.moveUp');
+    moveUpBtn.disabled = i === 0;
+    moveUpBtn.addEventListener('click', () => {
+      formTemplates.syncActiveFields(templateFields);
+      if (formTemplates.moveField(i, -1)) {
+        templateFields = formTemplates.getActiveFields();
+        renderTemplateEditor();
+        persistTemplate();
+      }
+    });
+
+    const moveDownBtn = document.createElement('button');
+    moveDownBtn.type = 'button';
+    moveDownBtn.className = 'field-move';
+    moveDownBtn.textContent = '↓';
+    moveDownBtn.title = t('form.moveDown');
+    moveDownBtn.disabled = i === templateFields.length - 1;
+    moveDownBtn.addEventListener('click', () => {
+      formTemplates.syncActiveFields(templateFields);
+      if (formTemplates.moveField(i, 1)) {
+        templateFields = formTemplates.getActiveFields();
+        renderTemplateEditor();
+        persistTemplate();
+      }
+    });
 
     const nameInput = document.createElement('input');
     nameInput.type = 'text';
@@ -1293,11 +1425,12 @@ function renderTemplateEditor() {
     removeBtn.title = t('form.removeField');
     removeBtn.addEventListener('click', () => {
       templateFields.splice(i, 1);
+      formTemplates.setActiveFields(templateFields).catch(() => {});
       renderTemplateEditor();
       persistTemplate();
     });
 
-    row.append(nameInput, hintInput, removeBtn);
+    row.append(moveUpBtn, moveDownBtn, nameInput, hintInput, removeBtn);
     templateFieldsEl.appendChild(row);
   });
 }
@@ -1306,22 +1439,115 @@ addFieldBtn.addEventListener('click', () => {
   templateFields.push({ name: '', hint: '' });
   renderTemplateEditor();
   templateFieldsEl.querySelector('.template-field-row:last-child .field-name')?.focus();
-});
-
-resetTemplateBtn.addEventListener('click', () => {
-  templateFields = getDefaultTemplate().map(f => ({ ...f }));
-  renderTemplateEditor();
   persistTemplate();
 });
 
+resetTemplateBtn.addEventListener('click', async () => {
+  await formTemplates.applyTemplateById(formTemplates.BUILTIN_STANDARD_ID);
+  syncTemplateFieldsFromLibrary();
+  showToast(t('form.templateApplied'));
+});
+
+if (applyTemplateBtn) {
+  applyTemplateBtn.addEventListener('click', async () => {
+    const id = templateSelect?.value;
+    if (!id) return;
+    await formTemplates.applyTemplateById(id);
+    syncTemplateFieldsFromLibrary();
+    showToast(t('form.templateApplied'));
+  });
+}
+
+if (saveTemplateLibBtn) {
+  saveTemplateLibBtn.addEventListener('click', async () => {
+    const name = window.prompt(t('form.templateNamePrompt'), formTemplates.getActiveTemplateMeta().name);
+    if (!name || !name.trim()) return;
+    try {
+      await formTemplates.saveCustomTemplate({ name: name.trim(), sourceId: formTemplates.getActiveTemplateId() });
+      syncTemplateFieldsFromLibrary();
+      showToast(t('form.templateSaved'));
+    } catch (e) {
+      showToast(t('toast.error', { error: e.message }));
+    }
+  });
+}
+
+if (duplicateTemplateBtn) {
+  duplicateTemplateBtn.addEventListener('click', async () => {
+    try {
+      await formTemplates.duplicateTemplate(formTemplates.getActiveTemplateId());
+      syncTemplateFieldsFromLibrary();
+      showToast(t('form.templateSaved'));
+    } catch (e) {
+      showToast(t('toast.error', { error: e.message }));
+    }
+  });
+}
+
+if (renameTemplateBtn) {
+  renameTemplateBtn.addEventListener('click', async () => {
+    const meta = formTemplates.getActiveTemplateMeta();
+    if (meta.builtin) return;
+    const name = window.prompt(t('form.templateRenamePrompt'), meta.name);
+    if (!name || !name.trim()) return;
+    try {
+      await formTemplates.renameCustomTemplate(meta.id, name.trim());
+      syncTemplateFieldsFromLibrary();
+      showToast(t('toast.renamed'));
+    } catch (e) {
+      showToast(t('toast.error', { error: e.message }));
+    }
+  });
+}
+
+if (deleteTemplateBtn) {
+  deleteTemplateBtn.addEventListener('click', async () => {
+    const meta = formTemplates.getActiveTemplateMeta();
+    if (meta.builtin) return;
+    if (!window.confirm(t('form.deleteTemplate') + '?')) return;
+    try {
+      await formTemplates.deleteCustomTemplate(meta.id);
+      syncTemplateFieldsFromLibrary();
+      showToast(t('form.templateDeleted'));
+    } catch (e) {
+      showToast(t('toast.error', { error: e.message }));
+    }
+  });
+}
+
+if (exportTemplateBtn) {
+  exportTemplateBtn.addEventListener('click', () => {
+    const meta = formTemplates.getActiveTemplateMeta();
+    formTemplates.exportTemplateJson({ ...meta, fields: templateFields });
+  });
+}
+
+if (importTemplateBtn && importTemplateInput) {
+  importTemplateBtn.addEventListener('click', () => importTemplateInput.click());
+  importTemplateInput.addEventListener('change', async () => {
+    const file = importTemplateInput.files?.[0];
+    importTemplateInput.value = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const obj = JSON.parse(text);
+      await formTemplates.importTemplateFromJson(obj);
+      syncTemplateFieldsFromLibrary();
+      showToast(t('form.templateImported'));
+    } catch (e) {
+      showToast(t('toast.error', { error: e.message }));
+    }
+  });
+}
+
 async function loadTemplate() {
   try {
-    const saved = await db.getFormTemplate();
-    if (Array.isArray(saved) && saved.length) {
-      templateFields = saved.map(f => ({ name: String(f.name || ''), hint: String(f.hint || '') }));
-    }
-  } catch (_) { /* keep defaults */ }
-  renderTemplateEditor();
+    await formTemplates.initTemplateLibrary();
+    syncTemplateFieldsFromLibrary();
+  } catch (_) {
+    templateFields = getDefaultTemplate().map((f) => ({ ...f }));
+    renderTemplateEditor();
+  }
 }
 
 function buildSchema() {
@@ -1471,8 +1697,36 @@ const reviewUI = createReviewUI(reviewRoot, {
 
 const formReviewUI = createFormReviewUI(formReviewRoot, {
   onChange: () => persistPipeline(),
-  onApprove: () => { persistPipeline(); showToast(t('toast.formApproved')); },
+  onApprove: () => {
+    persistPipeline();
+    if (currentDetailTranscript && pipeline && currentDetailTranscript.id === pipeline.id) {
+      currentDetailTranscript = { ...currentDetailTranscript, form: pipeline.form };
+      renderDetailFormPreview(currentDetailTranscript);
+    }
+    loadSavedList();
+    showToast(t('toast.formApproved'));
+  },
   onExport: (p) => exportFinalForm(p),
+  onCopy: async (p, format) => {
+    try {
+      await copyFormToClipboard(p.form, format);
+      showToast(t('form.copySuccess'));
+    } catch (_) {
+      showToast(t('form.copyFailed'));
+    }
+  },
+  onCopyField: async (field) => {
+    try {
+      await copyFieldToClipboard(field);
+      showToast(t('form.copySuccess'));
+    } catch (_) {
+      showToast(t('form.copyFailed'));
+    }
+  },
+  onDownloadTxt: (p) => {
+    const name = (p.title || 'form').replace(/\s+/g, '_');
+    downloadFormTxt(p.form, `${name}_form.txt`);
+  },
 });
 
 const persistPipeline = debounce(() => {
@@ -1531,11 +1785,14 @@ function loadPipelineFromEntry(entry) {
     formPanel.classList.remove('hidden');
     const n = (pipeline.form.fields && pipeline.form.fields.length) || 0;
     setFormPanelStatus('success', t('form.savedLoaded', { count: n }));
-    formReviewUI.render(pipeline);
+    setFormGridCollapsed(true);
+    const mode = pipeline.form.approvedAt ? 'summary' : 'review';
+    formReviewUI.render(pipeline, { mode });
   } else {
     formPanel.classList.add('hidden');
     formReviewUI.clear();
     setFormPanelStatus('', '');
+    setFormGridCollapsed(false);
   }
   renderPerfPanel(pipeline.metrics);
   renderDetailPerfPanel(pipeline.metrics);
@@ -1548,6 +1805,7 @@ function resetPipelineUI() {
   reviewPanel.classList.add('hidden');
   formPanel.classList.add('hidden');
   setFormPanelStatus('', '');
+  setFormGridCollapsed(false);
 }
 
 function updateBusyButtons() {
@@ -1748,7 +2006,10 @@ async function runGenerateForm() {
       memory: extractMetrics?.memory,
     });
     if (!auth.isUnlocked()) return;
+    const templateMeta = formTemplates.getActiveTemplateMeta();
     pipeline.form = {
+      templateId: templateMeta.id,
+      templateName: templateMeta.name,
       fields: data.fields,
       missingFields: data.missing_fields,
       overallWarnings: data.overall_warnings,
@@ -1760,7 +2021,8 @@ async function runGenerateForm() {
     pipeline.metrics = currentMetrics;
     applyMetrics(currentMetrics);
 
-    formReviewUI.render(pipeline);
+    setFormGridCollapsed(true);
+    formReviewUI.render(pipeline, { mode: 'review' });
     const filledCount = data.fields.filter((f) => f.value && f.value !== 'niet vermeld').length;
     setFormPanelStatus(
       'success',
@@ -1785,14 +2047,6 @@ async function runGenerateForm() {
 }
 
 // --- Export text helpers ---
-function formAsTextStructured(form) {
-  const normalized = normalizePipelineForm(form);
-  if (!normalized || !normalized.fields.length) return '';
-  return normalized.fields
-    .map((f) => `${f.field_name}:\n${f.value || '—'}${f.needs_review ? t('export.needsReview') : ''}`)
-    .join('\n\n');
-}
-
 function buildTranscriptExportText(p, fallbackText) {
   if (!p) return fallbackText || '';
   const parts = [];
@@ -1803,7 +2057,7 @@ function buildTranscriptExportText(p, fallbackText) {
   } else if (p.correction && p.correction.correctedText) {
     parts.push(t('export.correctedHeader') + '\n' + p.correction.correctedText);
   }
-  const formText = formAsTextStructured(p.form);
+  const formText = formatFormLabeled(p.form);
   if (formText) {
     parts.push(t('export.formHeader') + '\n' + formText);
   }
@@ -1954,14 +2208,16 @@ function handleLocked() {
   detailContent.textContent = '';
   detailEditArea.value = '';
   detailTitle.textContent = '—';
+  if (detailFormPreview) detailFormPreview.classList.add('hidden');
   exitEditMode();
 
   // Saved list, pipeline (review + form), local session rules, and template
   savedListEl.innerHTML = '<li class="empty-state">' + escapeHtml(t('saved.locked')) + '</li>';
   resetPipelineUI();
   correctionMemory.clearSessionRules();
-  templateFields = getDefaultTemplate().map(f => ({ ...f }));
-  templateFieldsEl.innerHTML = '';
+  templateFields = getDefaultTemplate().map((f) => ({ ...f }));
+  if (templateFieldsEl) templateFieldsEl.innerHTML = '';
+  if (templateSelect) templateSelect.innerHTML = '';
 
   // Back to the login screen
   lockBtn.style.display = 'none';
@@ -2036,8 +2292,10 @@ function refreshDynamicUI() {
   if (auth.isUnlocked()) loadSavedList();
   if (pipeline?.correction) reviewUI.render(pipeline);
   else if (!pipeline) reviewUI.clear();
+  renderTemplateSelect();
+  updateTemplateManageButtons();
   if (pipeline?.form) formReviewUI.render(pipeline);
-  else if (!formReviewRoot.querySelector('.tform-field')) {
+  else if (!formReviewRoot.querySelector('.tform-field') && !formReviewRoot.querySelector('.form-summary-field')) {
     formReviewUI.clear();
   }
   if (!modelReady && !pendingLoad) {

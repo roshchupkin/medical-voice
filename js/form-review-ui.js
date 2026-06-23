@@ -12,6 +12,7 @@
 // and the traceable form).
 
 import { resolveSegmentChain, normalizeSegmentId } from './final-transcript.js';
+import { NOT_MENTIONED } from './safety.js';
 import { t, onLangChange } from './i18n.js';
 
 function el(tag, className, text) {
@@ -39,9 +40,14 @@ export function normalizePipelineForm(form) {
       missingFields: form.missingFields || form.missing_fields || [],
       overallWarnings: form.overallWarnings || form.overall_warnings || [],
       approvedAt: form.approvedAt || null,
+      templateId: form.templateId || null,
+      templateName: form.templateName || null,
     };
   }
-  const metaKeys = new Set(['fields', 'missingFields', 'missing_fields', 'overallWarnings', 'overall_warnings', 'approvedAt']);
+  const metaKeys = new Set([
+    'fields', 'missingFields', 'missing_fields', 'overallWarnings', 'overall_warnings',
+    'approvedAt', 'templateId', 'templateName',
+  ]);
   const legacy = Object.entries(form).filter(([k]) => !metaKeys.has(k));
   if (!legacy.length) return null;
   return {
@@ -58,6 +64,8 @@ export function normalizePipelineForm(form) {
     missingFields: [],
     overallWarnings: [t('form.legacyWarning')],
     approvedAt: form.approvedAt || null,
+    templateId: form.templateId || null,
+    templateName: form.templateName || null,
   };
 }
 
@@ -65,27 +73,88 @@ function formFields(form) {
   return (form && Array.isArray(form.fields)) ? form.fields : [];
 }
 
+function isNotMentioned(value) {
+  if (!value || !String(value).trim()) return true;
+  return String(value).trim().toLowerCase() === NOT_MENTIONED.toLowerCase();
+}
+
 export function createFormReviewUI(root, callbacks = {}) {
-  const { onChange, onApprove, onExport } = callbacks;
+  const { onChange, onApprove, onExport, onCopy, onCopyField, onDownloadTxt } = callbacks;
   let pipeline = null;
+  let viewMode = 'review';
 
   root.innerHTML = '';
   const warnings = el('div', 'form-warnings');
   const fieldsWrap = el('div', 'form-fields-wrap');
   const missingWrap = el('div', 'form-missing');
-  const actions = el('div', 'row form-actions');
+  const actions = el('div', 'row form-actions form-actions-sticky');
+  const modeReviewBtn = el('button', 'form-mode-btn', t('form.modeReview'));
+  modeReviewBtn.type = 'button';
+  const modeSummaryBtn = el('button', 'form-mode-btn', t('form.modeSummary'));
+  modeSummaryBtn.type = 'button';
   const approveBtn = el('button', 'primary', t('form.approve'));
   approveBtn.type = 'button';
+  const copyWrap = el('div', 'form-copy-wrap');
+  const copyBtn = el('button', '', t('form.copy'));
+  copyBtn.type = 'button';
+  const copyMenu = el('div', 'form-copy-menu hidden');
+  const copyLabeledBtn = el('button', 'button-as-link', t('form.copyLabeled'));
+  copyLabeledBtn.type = 'button';
+  const copySoepBtn = el('button', 'button-as-link', t('form.copySoep'));
+  copySoepBtn.type = 'button';
+  copyMenu.append(copyLabeledBtn, copySoepBtn);
+  copyWrap.append(copyBtn, copyMenu);
+  const downloadTxtBtn = el('button', '', t('form.downloadTxt'));
+  downloadTxtBtn.type = 'button';
   const exportBtn = el('button', '', t('form.exportJson'));
   exportBtn.type = 'button';
   const statusEl = el('span', 'form-approval-status', '');
-  actions.append(approveBtn, exportBtn, statusEl);
+  const modeGroup = el('span', 'form-mode-group');
+  modeGroup.append(modeReviewBtn, modeSummaryBtn);
+  actions.append(modeGroup, approveBtn, copyWrap, downloadTxtBtn, exportBtn, statusEl);
   root.append(warnings, fieldsWrap, missingWrap, actions);
+
+  function setViewMode(mode) {
+    viewMode = mode === 'summary' ? 'summary' : 'review';
+    modeReviewBtn.classList.toggle('active', viewMode === 'review');
+    modeSummaryBtn.classList.toggle('active', viewMode === 'summary');
+    if (pipeline && pipeline.form) {
+      renderWarnings();
+      if (viewMode === 'summary') renderSummaryFields();
+      else renderFields();
+      renderMissing();
+    }
+  }
+
+  modeReviewBtn.addEventListener('click', () => setViewMode('review'));
+  modeSummaryBtn.addEventListener('click', () => setViewMode('summary'));
+
+  copyBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    copyMenu.classList.toggle('hidden');
+  });
+  document.addEventListener('click', () => copyMenu.classList.add('hidden'));
+
+  async function doCopy(format) {
+    copyMenu.classList.add('hidden');
+    if (!pipeline || !pipeline.form) return;
+    if (onCopy) await onCopy(pipeline, format);
+  }
+  copyLabeledBtn.addEventListener('click', (e) => { e.stopPropagation(); doCopy('labeled'); });
+  copySoepBtn.addEventListener('click', (e) => { e.stopPropagation(); doCopy('soep'); });
+
+  downloadTxtBtn.addEventListener('click', () => {
+    if (!pipeline || !pipeline.form) return;
+    if (onDownloadTxt) onDownloadTxt(pipeline);
+  });
 
   approveBtn.addEventListener('click', () => {
     if (!pipeline || !pipeline.form) return;
+    const needsReview = formFields(pipeline.form).filter((f) => f.needs_review).length;
+    if (needsReview && !window.confirm(t('form.approveConfirm', { count: needsReview }))) return;
     pipeline.form.approvedAt = new Date().toISOString();
     renderStatus();
+    setViewMode('summary');
     if (onApprove) onApprove(pipeline);
   });
   exportBtn.addEventListener('click', () => {
@@ -95,7 +164,13 @@ export function createFormReviewUI(root, callbacks = {}) {
   });
 
   function refreshActionLabels() {
+    modeReviewBtn.textContent = t('form.modeReview');
+    modeSummaryBtn.textContent = t('form.modeSummary');
     approveBtn.textContent = t('form.approve');
+    copyBtn.textContent = t('form.copy');
+    copyLabeledBtn.textContent = t('form.copyLabeled');
+    copySoepBtn.textContent = t('form.copySoep');
+    downloadTxtBtn.textContent = t('form.downloadTxt');
     exportBtn.textContent = t('form.exportJson');
   }
 
@@ -191,6 +266,40 @@ export function createFormReviewUI(root, callbacks = {}) {
     }
   }
 
+  function renderSummaryFields() {
+    fieldsWrap.innerHTML = '';
+    if (!pipeline || !pipeline.form) return;
+
+    if (pipeline.form.templateName) {
+      const meta = el('p', 'form-summary-template', t('form.templateUsed', { name: pipeline.form.templateName }));
+      fieldsWrap.append(meta);
+    }
+
+    for (const field of formFields(pipeline.form)) {
+      const empty = isNotMentioned(field.value);
+      const wrap = el('div', 'form-summary-field' + (field.needs_review ? ' needs-review' : '') + (empty ? ' empty-value' : ''));
+
+      const head = el('div', 'form-summary-head');
+      head.append(el('strong', 'form-summary-label', field.field_name));
+      const flags = el('span', 'form-summary-flags');
+      if (field.needs_review) flags.append(el('span', 'tform-flag review', t('form.needsReview')));
+      if (empty) flags.append(el('span', 'tform-flag empty-flag', NOT_MENTIONED));
+      if (flags.childNodes.length) head.append(flags);
+      wrap.append(head);
+
+      const valueEl = el('div', 'form-summary-value', empty ? NOT_MENTIONED : field.value);
+      wrap.append(valueEl);
+
+      const copyFieldBtn = el('button', 'button-as-link form-copy-field-btn', t('form.copyField'));
+      copyFieldBtn.type = 'button';
+      copyFieldBtn.addEventListener('click', async () => {
+        if (onCopyField) await onCopyField(field);
+      });
+      wrap.append(copyFieldBtn);
+      fieldsWrap.append(wrap);
+    }
+  }
+
   function buildSourcePanel(panel, field) {
     panel.innerHTML = '';
     const normSid = normalizeSegmentId(field.source_segment_id);
@@ -280,7 +389,8 @@ export function createFormReviewUI(root, callbacks = {}) {
   function fullRender() {
     refreshActionLabels();
     renderWarnings();
-    renderFields();
+    if (viewMode === 'summary') renderSummaryFields();
+    else renderFields();
     renderMissing();
     renderStatus();
   }
@@ -296,12 +406,27 @@ export function createFormReviewUI(root, callbacks = {}) {
   });
 
   return {
-    render(p) {
+    render(p, opts = {}) {
       pipeline = p;
       if (!pipeline || !pipeline.form) { this.clear(); return; }
       pipeline.form = normalizePipelineForm(pipeline.form);
       if (!pipeline.form) { this.clear(); return; }
+      if (opts.mode) {
+        viewMode = opts.mode === 'summary' ? 'summary' : 'review';
+      } else if (pipeline.form.approvedAt) {
+        viewMode = 'summary';
+      } else {
+        viewMode = 'review';
+      }
+      modeReviewBtn.classList.toggle('active', viewMode === 'review');
+      modeSummaryBtn.classList.toggle('active', viewMode === 'summary');
       fullRender();
+    },
+    setMode(mode) {
+      setViewMode(mode);
+    },
+    getMode() {
+      return viewMode;
     },
     clear() {
       pipeline = null;
